@@ -24,6 +24,13 @@ test:
 deny:
     cargo deny check
 
+# Conventional Commits on base..HEAD (F18). CI cannot skip; local hook can.
+commits base="":
+    ./scripts/check-commits {{base}}
+
+# What CI runs: local check plus the commit-message range.
+ci: check commits
+
 # Install the local commit-msg hook (skippable; CI cannot skip).
 hooks:
     ln -sfn ../../scripts/commit-msg .git/hooks/commit-msg

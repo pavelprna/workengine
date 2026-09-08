@@ -1,0 +1,35 @@
+# GitHub Actions is an adapter around `just check` / `just commits`.
+# Check logic lives in the justfile, not only here.
+
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,cargo-deny
+      - name: just check
+        run: just check
+      - name: Conventional Commits (F18)
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+            just commits "origin/${{ github.base_ref }}"
+          elif [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]; then
+            just commits "${{ github.event.before }}"
+          else
+            just commits
+          fi

@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# F18: Conventional Commits on a git range. Same checker as the commit-msg hook.
+# Usage: check-commits [base-ref-or-sha]
+# Range is base..HEAD. If base is missing or not an ancestor, checks HEAD only.
+set -euo pipefail
+
+root=$(git rev-parse --show-toplevel)
+checker=${root}/scripts/commit-msg
+base=${1:-}
+
+if [[ -z ${base} ]]; then
+    if git rev-parse --verify origin/main >/dev/null 2>&1; then
+        base=origin/main
+    elif git rev-parse --verify main >/dev/null 2>&1; then
+        base=main
+    fi
+fi
+
+if [[ -n ${base} ]] && git merge-base --is-ancestor "${base}" HEAD 2>/dev/null; then
+    mapfile -t shas < <(git rev-list --reverse "${base}..HEAD")
+else
+    mapfile -t shas < <(git rev-list --max-count=1 HEAD)
+fi
+
+if [[ ${#shas[@]} -eq 0 || -z ${shas[0]-} ]]; then
+    mapfile -t shas < <(git rev-list --max-count=1 HEAD)
+fi
+
+tmp=$(mktemp)
+trap 'rm -f "${tmp}"' EXIT
+failed=0
+for sha in "${shas[@]}"; do
+    [[ -z ${sha} ]] && continue
+    git log -1 --format=%B "${sha}" >"${tmp}"
+    if ! "${checker}" "${tmp}"; then
+        echo "check-commits: failed on ${sha}" >&2
+        git log -1 --oneline "${sha}" >&2
+        failed=1
+    fi
+done
+exit "${failed}"

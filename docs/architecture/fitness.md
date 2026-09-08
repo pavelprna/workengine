@@ -54,7 +54,7 @@ These are not SemVer surfaces and not architecture. Canon for commits is `CONTRI
 
 | ID | Invariant | Check | Status |
 | --- | --- | --- | --- |
-| F18 | Commits on the default branch match Conventional Commits | commit-msg hook + CI range check | [UNTESTED] |
+| F18 | Commits on the default branch match Conventional Commits | `scripts/commit-msg` + `just commits` in CI | enforced |
 | F19 | `cargo deny check` is part of `just check` | `just check` | enforced |
 
 ## Operator, memory, and observation

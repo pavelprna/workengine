@@ -59,6 +59,8 @@ The only local interface is `just check`. Same steps as CI. Do not put logic onl
 
 `just check` runs `cargo fmt --all -- --check`, `cargo clippy --locked --workspace --all-targets -- -D warnings`, `cargo test --locked --workspace`, and `cargo deny check`.
 
+CI runs `just check` and `just commits` (Conventional Commits on the branch range, fitness F18). Do not put extra check logic only in a git-host YAML file.
+
 `just` and `cargo-deny` must be on `PATH`. With the pinned toolchain:
 
 ```
