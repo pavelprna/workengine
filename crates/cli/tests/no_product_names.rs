@@ -1,4 +1,5 @@
 //! F4: domain source contains no product or tracker names.
+//! Lives here so the scan can read files without violating domain clippy (F3).
 
 use std::fs;
 use std::path::Path;
@@ -25,7 +26,7 @@ const FORBIDDEN: &[&str] = &[
 
 #[test]
 fn domain_src_has_no_product_or_tracker_names() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../domain/src");
     let mut hits = Vec::new();
     visit(&root, &mut hits);
     assert!(

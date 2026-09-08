@@ -13,7 +13,7 @@ Enforced by the Cargo workspace as soon as crates exist. Clippy and `cargo deny`
 | F1 | `workengine-domain` does not depend on application, adapters, or cli | Cargo.toml graph / `cargo check --workspace` | enforced |
 | F2 | `workengine-application` does not depend on adapters or cli | Cargo.toml graph | enforced |
 | F3 | `workengine-domain` does not use filesystem, process, or network APIs | `crates/domain/clippy.toml` / clippy `disallowed_methods` / `disallowed_types` | enforced |
-| F4 | `workengine-domain` contains no product or tracker names | `crates/domain/tests/no_product_names.rs` | enforced |
+| F4 | `workengine-domain` contains no product or tracker names | `crates/cli/tests/no_product_names.rs` | enforced |
 | F5 | `workengine-application` does not spawn processes or open sockets | `crates/application/clippy.toml` / clippy + crate graph | enforced |
 
 ## Domain behaviour
@@ -63,7 +63,7 @@ These are not SemVer surfaces and not architecture. Canon for commits is `CONTRI
 | --- | --- | --- | --- |
 | F20 | `park` is not abort: save point and free slot, without process-group kill as the park path | worker / application test | enforced |
 | F21 | Workspace has append-only memory; write only after a confirmed outcome | workspace test | enforced |
-| F22 | Supervised subprocess output uses one streaming format with `work_id` | CLI / runner tests | [UNTESTED] |
+| F22 | Supervised subprocess output uses one streaming format with `work_id` | CLI / runner tests | enforced |
 
 ## How to add a check
 
