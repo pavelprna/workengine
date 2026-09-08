@@ -21,7 +21,7 @@ Enforced by the Cargo workspace as soon as crates exist. Clippy and `cargo deny`
 | ID | Invariant | Check | Status |
 | --- | --- | --- | --- |
 | F6 | Illegal transition is a domain error, not a coerced status | domain unit test | enforced |
-| F7 | `next`, `start`, `complete`, and `park` are idempotent | domain / application test | [UNTESTED] |
+| F7 | `next`, `start`, `complete`, and `park` are idempotent | domain / application test | enforced |
 | F8 | Outcome kinds are a closed enum; unknown kind is a schema error | parse test | enforced |
 | F9 | FSM `match` is exhaustive | `cargo test` / compiler | enforced |
 | F10 | First-slice Work statuses are `ready`, `running`, `succeeded`, `failed`, `parked` | domain enum test | enforced |
@@ -61,7 +61,7 @@ These are not SemVer surfaces and not architecture. Canon for commits is `CONTRI
 
 | ID | Invariant | Check | Status |
 | --- | --- | --- | --- |
-| F20 | `park` is not abort: save point and free slot, without process-group kill as the park path | worker / application test | [UNTESTED] |
+| F20 | `park` is not abort: save point and free slot, without process-group kill as the park path | worker / application test | enforced |
 | F21 | Workspace has append-only memory; write only after a confirmed outcome | workspace test | [UNTESTED] |
 | F22 | Supervised subprocess output uses one streaming format with `work_id` | CLI / runner tests | [UNTESTED] |
 

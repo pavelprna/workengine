@@ -9,6 +9,8 @@ description = "Workengine use cases and port traits. Depends only on workengine-
 
 [dependencies]
 workengine-domain.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
 
 [lints]
 workspace = true
