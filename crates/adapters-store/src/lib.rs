@@ -12,6 +12,25 @@ use workengine_domain::{
 };
 
 const WORK_SCHEMA_VERSION: u32 = 1;
+/// SQLite `user_version`. Distinct from per-row `schema_version` on Work.
+const STORE_USER_VERSION: i32 = 1;
+
+const MIGRATION_1: &str = "
+CREATE TABLE IF NOT EXISTS works (
+    id TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    goal TEXT NOT NULL,
+    worker_profile TEXT NOT NULL,
+    workspace_root TEXT,
+    created_at_unix_ms INTEGER NOT NULL,
+    schema_version INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS events (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    work_id TEXT NOT NULL,
+    payload TEXT NOT NULL
+);
+";
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -43,25 +62,7 @@ impl SqliteStore {
         let data_dir = data_dir.as_ref();
         std::fs::create_dir_all(data_dir).map_err(AppError::store)?;
         let conn = Connection::open(data_dir.join("workengine.sqlite")).map_err(AppError::store)?;
-        conn.execute_batch(
-            "
-            CREATE TABLE IF NOT EXISTS works (
-                id TEXT PRIMARY KEY,
-                status TEXT NOT NULL,
-                goal TEXT NOT NULL,
-                worker_profile TEXT NOT NULL,
-                workspace_root TEXT,
-                created_at_unix_ms INTEGER NOT NULL,
-                schema_version INTEGER NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS events (
-                seq INTEGER PRIMARY KEY AUTOINCREMENT,
-                work_id TEXT NOT NULL,
-                payload TEXT NOT NULL
-            );
-            ",
-        )
-        .map_err(AppError::store)?;
+        migrate(&conn)?;
         Ok(Self { conn })
     }
 
@@ -158,6 +159,23 @@ impl WorkStore for SqliteStore {
         tx.commit().map_err(AppError::store)?;
         Ok(())
     }
+}
+
+fn migrate(conn: &Connection) -> Result<(), AppError> {
+    let current: i32 = conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(AppError::store)?;
+    if current > STORE_USER_VERSION {
+        return Err(AppError::from(
+            workengine_domain::DomainError::UnsupportedSchemaVersion(current as u32),
+        ));
+    }
+    if current < 1 {
+        conn.execute_batch(MIGRATION_1).map_err(AppError::store)?;
+        conn.pragma_update(None, "user_version", 1)
+            .map_err(AppError::store)?;
+    }
+    Ok(())
 }
 
 fn put_in_tx(tx: &Transaction<'_>, work: &Work, event: &WorkEvent) -> Result<(), AppError> {
@@ -323,5 +341,68 @@ mod tests {
         let domain: Vec<&str> = WorkStatus::ALL.iter().map(|s| s.as_str()).collect();
         assert_eq!(statuses, domain);
         assert_eq!(schema["properties"]["schemaVersion"]["const"], 1);
+    }
+
+    #[test]
+    fn open_sets_store_user_version_one() {
+        let (store, _dir) = store();
+        let version: i32 = store
+            .conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, STORE_USER_VERSION);
+    }
+
+    #[test]
+    fn reopen_of_v1_is_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut first = SqliteStore::open(dir.path()).unwrap();
+        let work = sample();
+        first.put(&work, WorkEvent::created(&work)).unwrap();
+        drop(first);
+        let second = SqliteStore::open(dir.path()).unwrap();
+        let loaded = second.get(work.id()).unwrap().unwrap();
+        assert_eq!(loaded.status(), WorkStatus::Ready);
+        let version: i32 = second
+            .conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 1);
+    }
+
+    #[test]
+    fn v0_file_with_tables_migrates_to_v1() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workengine.sqlite");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(MIGRATION_1).unwrap();
+        let version: i32 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 0);
+        drop(conn);
+        let store = SqliteStore::open(dir.path()).unwrap();
+        let version: i32 = store
+            .conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 1);
+    }
+
+    #[test]
+    fn unknown_store_user_version_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workengine.sqlite");
+        let conn = Connection::open(&path).unwrap();
+        conn.pragma_update(None, "user_version", 2).unwrap();
+        drop(conn);
+        let err = match SqliteStore::open(dir.path()) {
+            Ok(_) => panic!("expected unknown store version to fail"),
+            Err(err) => err,
+        };
+        assert!(matches!(
+            err,
+            AppError::Domain(workengine_domain::DomainError::UnsupportedSchemaVersion(2))
+        ));
     }
 }
