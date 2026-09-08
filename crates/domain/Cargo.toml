@@ -9,3 +9,6 @@ description = "Workengine domain: identifiers, FSM, closed outcomes. No I/O."
 
 [lints]
 workspace = true
+
+[dependencies]
+thiserror.workspace = true
