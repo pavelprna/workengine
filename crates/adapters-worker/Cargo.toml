@@ -10,6 +10,12 @@ description = "Workengine WorkerRunner adapters."
 [dependencies]
 workengine-application.workspace = true
 workengine-domain.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+nix.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

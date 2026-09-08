@@ -37,7 +37,7 @@ Enforced by the Cargo workspace as soon as crates exist. Clippy and `cargo deny`
 
 | ID | Invariant | Check | Status |
 | --- | --- | --- | --- |
-| F13 | Timeout kills the process group, not only the parent | worker adapter test | [UNTESTED] |
+| F13 | Timeout kills the process group, not only the parent | worker adapter test | enforced |
 | F14 | Two Work ids never share a workspace root | workspace test | enforced |
 | F15 | Kill/restart mid-`complete` resumes; second `complete` is idempotent | durable-execution test on stub Worker | [UNTESTED] |
 
