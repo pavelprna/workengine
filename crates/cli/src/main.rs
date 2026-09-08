@@ -5,13 +5,17 @@ use std::time::Duration;
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use workengine_adapters_store::SqliteStore;
-use workengine_adapters_worker::{StubBehavior, StubWorkerRunner, decode_outcome};
+use workengine_adapters_worker::{
+    ProcessWorkerRunner, StubBehavior, StubWorkerRunner, decode_outcome,
+};
 use workengine_adapters_workspace::DirWorkspaceFactory;
 use workengine_application::{
     AppError, StartRequest, SystemClock, WorkStore, complete, create, next, park,
     recover_unconfirmed, start,
 };
 use workengine_domain::{DomainError, OutcomeKind, WorkId, WorkStatus};
+
+mod profile;
 
 const DEFAULT_BUDGET: Duration = Duration::from_secs(60);
 
@@ -27,6 +31,9 @@ struct Cli {
     /// Directory for the SQLite store and workspaces
     #[arg(long, env = "WORKENGINE_DATA_DIR")]
     data_dir: Option<PathBuf>,
+    /// Worker profile file (TOML). Validated lazily for the Work's profile.
+    #[arg(long, env = "WORKENGINE_CONFIG")]
+    config: Option<PathBuf>,
     /// Hidden first-slice knobs for the stub Worker. Not a public contract.
     #[arg(
         long,
@@ -38,7 +45,7 @@ struct Cli {
     /// Worker time budget in milliseconds. Hidden; default 60000.
     #[arg(long, env = "WORKENGINE_BUDGET_MS", hide = true)]
     budget_ms: Option<u64>,
-    /// Extra channel retries. Hidden; default 0.
+    /// Extra channel retries. Hidden; default 0, or the profile's retry_limit.
     #[arg(long, env = "WORKENGINE_RETRY_LIMIT", hide = true)]
     retry_limit: Option<u32>,
     #[command(subcommand)]
@@ -120,12 +127,20 @@ fn run() -> anyhow::Result<u8> {
         Command::Start { work, checkout } => {
             let mut store = open_store(&data_dir, true)?;
             let workspaces = DirWorkspaceFactory::new(&data_dir);
-            let behavior: StubBehavior = cli
-                .stub_behavior
-                .parse()
-                .map_err(|err: String| anyhow::anyhow!(err))?;
-            let runner = StubWorkerRunner::new(behavior);
             let id = WorkId::parse(work)?;
+            let profile_name = store
+                .get(&id)?
+                .ok_or_else(|| AppError::NotFound(id.clone()))?
+                .attributes()
+                .worker_profile()
+                .to_owned();
+            let selected = select_runner(
+                cli.config.as_deref(),
+                &cli.stub_behavior,
+                cli.retry_limit,
+                &profile_name,
+                checkout,
+            )?;
             let budget = cli
                 .budget_ms
                 .map(Duration::from_millis)
@@ -133,13 +148,13 @@ fn run() -> anyhow::Result<u8> {
             let work = start(
                 &mut store,
                 &workspaces,
-                &runner,
+                &selected.runner,
                 &SystemClock,
                 &StartRequest {
                     id: &id,
                     budget,
-                    retry_limit: cli.retry_limit.unwrap_or(0),
-                    checkout: checkout.as_deref(),
+                    retry_limit: selected.retry_limit,
+                    checkout: selected.checkout.as_deref(),
                 },
             )?;
             println!("{} {}", work.id(), work.status());
@@ -163,6 +178,79 @@ fn run() -> anyhow::Result<u8> {
             Ok(0)
         }
     }
+}
+
+enum AnyRunner {
+    Stub(StubWorkerRunner),
+    Process(ProcessWorkerRunner),
+}
+
+impl workengine_application::WorkerRunner for AnyRunner {
+    fn run(
+        &self,
+        request: &workengine_application::RunRequest<'_>,
+    ) -> Result<workengine_domain::Outcome, AppError> {
+        match self {
+            Self::Stub(runner) => runner.run(request),
+            Self::Process(runner) => runner.run(request),
+        }
+    }
+
+    fn decode(&self, bytes: &[u8]) -> Result<workengine_domain::Outcome, AppError> {
+        match self {
+            Self::Stub(runner) => runner.decode(bytes),
+            Self::Process(runner) => runner.decode(bytes),
+        }
+    }
+}
+
+struct SelectedRunner {
+    runner: AnyRunner,
+    retry_limit: u32,
+    checkout: Option<PathBuf>,
+}
+
+fn config_has_profile(table: &toml::Table, name: &str) -> bool {
+    table
+        .get("profile")
+        .and_then(toml::Value::as_table)
+        .is_some_and(|profiles| profiles.contains_key(name))
+}
+
+fn select_runner(
+    config: Option<&std::path::Path>,
+    stub_behavior: &str,
+    retry_limit: Option<u32>,
+    profile_name: &str,
+    checkout: Option<PathBuf>,
+) -> anyhow::Result<SelectedRunner> {
+    if let Some(path) = config {
+        let table = profile::load_table(path)?;
+        let listed = config_has_profile(&table, profile_name);
+        match profile::resolve_profile(&table, profile_name, |key| std::env::var(key).ok()) {
+            Ok(resolved) => {
+                let runner = ProcessWorkerRunner::new(resolved.argv, resolved.env)?;
+                return Ok(SelectedRunner {
+                    runner: AnyRunner::Process(runner),
+                    retry_limit: retry_limit.unwrap_or(resolved.retry_limit),
+                    checkout: checkout.or(resolved.checkout),
+                });
+            }
+            Err(_) if profile_name == "stub" && !listed => {}
+            Err(err) => return Err(err),
+        }
+    } else if profile_name != "stub" {
+        anyhow::bail!("profile {profile_name} needs --config with argv");
+    }
+
+    let behavior: StubBehavior = stub_behavior
+        .parse()
+        .map_err(|err: String| anyhow::anyhow!(err))?;
+    Ok(SelectedRunner {
+        runner: AnyRunner::Stub(StubWorkerRunner::new(behavior)),
+        retry_limit: retry_limit.unwrap_or(0),
+        checkout,
+    })
 }
 
 fn init_tracing() {

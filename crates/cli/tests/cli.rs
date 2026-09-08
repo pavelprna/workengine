@@ -416,17 +416,167 @@ fn channel_park_exits_parked() {
     assert!(stdout(&start).ends_with(" parked"));
 }
 
+#[cfg(unix)]
 #[test]
-fn start_copies_checkout_and_writes_the_goal() {
+fn process_profile_writes_goal_and_uses_outcome_file() {
     let dir = tempfile::tempdir().unwrap();
-    let src = dir.path().join("src");
-    std::fs::create_dir_all(&src).unwrap();
-    std::fs::write(src.join("hello.txt"), "copied").unwrap();
-    let id = create_work(dir.path());
+    let config = dir.path().join("workengine.toml");
+    std::fs::write(
+        &config,
+        r#"
+[profile.writer]
+argv = ["/bin/sh", "-c", "printf '%s\\n' '{\"schemaVersion\":1,\"kind\":\"succeeded\",\"workerProfile\":\"writer\"}' > outcome.json"]
+"#,
+    )
+    .unwrap();
+    let create = bin()
+        .args([
+            "--data-dir",
+            dir.path().to_str().unwrap(),
+            "create",
+            "--goal",
+            "from-cli",
+            "--profile",
+            "writer",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        create.status.success(),
+        "create failed: {}",
+        String::from_utf8_lossy(&create.stderr)
+    );
+    let id = stdout(&create)
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_owned();
     let start = bin()
         .args([
             "--data-dir",
             dir.path().to_str().unwrap(),
+            "--config",
+            config.to_str().unwrap(),
+            "start",
+            "--work",
+            &id,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        start.status.success(),
+        "start failed: {}",
+        String::from_utf8_lossy(&start.stderr)
+    );
+    assert!(stdout(&start).ends_with(" succeeded"));
+    let goal = std::fs::read_to_string(
+        dir.path()
+            .join("workspaces")
+            .join(&id)
+            .join("workengine-goal.txt"),
+    )
+    .unwrap();
+    assert_eq!(goal, "from-cli");
+}
+
+#[cfg(unix)]
+#[test]
+fn process_without_outcome_fails_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("workengine.toml");
+    std::fs::write(
+        &config,
+        r#"
+[profile.true]
+argv = ["/bin/true"]
+"#,
+    )
+    .unwrap();
+    let create = bin()
+        .args([
+            "--data-dir",
+            dir.path().to_str().unwrap(),
+            "create",
+            "--goal",
+            "no-artifact",
+            "--profile",
+            "true",
+        ])
+        .output()
+        .unwrap();
+    assert!(create.status.success());
+    let id = stdout(&create)
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_owned();
+    let start = bin()
+        .args([
+            "--data-dir",
+            dir.path().to_str().unwrap(),
+            "--config",
+            config.to_str().unwrap(),
+            "start",
+            "--work",
+            &id,
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        start.status.code(),
+        Some(1),
+        "stderr: {}",
+        String::from_utf8_lossy(&start.stderr)
+    );
+    assert!(stdout(&start).ends_with(" failed"));
+}
+
+#[cfg(unix)]
+#[test]
+fn checkout_copy_and_lazy_profile_validation() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("hello.txt"), "copied").unwrap();
+    let config = dir.path().join("workengine.toml");
+    std::fs::write(
+        &config,
+        r#"
+[profile.broken]
+argv = ["/bin/false"]
+
+[profile.broken.env]
+TOKEN = "inline-secret"
+
+[profile.writer]
+argv = ["/bin/sh", "-c", "printf '%s\\n' '{\"schemaVersion\":1,\"kind\":\"succeeded\",\"workerProfile\":\"writer\"}' > outcome.json"]
+"#,
+    )
+    .unwrap();
+    let create = bin()
+        .args([
+            "--data-dir",
+            dir.path().to_str().unwrap(),
+            "create",
+            "--goal",
+            "copy-me",
+            "--profile",
+            "writer",
+        ])
+        .output()
+        .unwrap();
+    assert!(create.status.success());
+    let id = stdout(&create)
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_owned();
+    let start = bin()
+        .args([
+            "--data-dir",
+            dir.path().to_str().unwrap(),
+            "--config",
+            config.to_str().unwrap(),
             "start",
             "--work",
             &id,
@@ -440,13 +590,7 @@ fn start_copies_checkout_and_writes_the_goal() {
         "start failed: {}",
         String::from_utf8_lossy(&start.stderr)
     );
-    let ws = dir.path().join("workspaces").join(&id);
-    assert_eq!(
-        std::fs::read_to_string(ws.join("hello.txt")).unwrap(),
-        "copied"
-    );
-    assert_eq!(
-        std::fs::read_to_string(ws.join("workengine-goal.txt")).unwrap(),
-        "do the thing"
-    );
+    let copied =
+        std::fs::read_to_string(dir.path().join("workspaces").join(&id).join("hello.txt")).unwrap();
+    assert_eq!(copied, "copied");
 }

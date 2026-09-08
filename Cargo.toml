@@ -33,6 +33,7 @@ nix = { version = "0.30.1", default-features = false, features = ["process", "si
 tempfile = "3.27.0"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", default-features = false, features = ["fmt", "env-filter", "std", "ansi"] }
+toml = { version = "0.8.23", default-features = false, features = ["parse"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
