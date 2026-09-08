@@ -18,11 +18,27 @@
       "type": "string",
       "enum": ["created", "started", "completed", "parked"]
     },
-    "from": { "type": ["string", "null"] },
-    "to": { "type": "string" },
+    "from": {
+      "type": ["string", "null"],
+      "enum": ["ready", "running", "succeeded", "failed", "parked", null]
+    },
+    "to": {
+      "type": "string",
+      "enum": ["ready", "running", "succeeded", "failed", "parked"]
+    },
     "goal": { "type": ["string", "null"] },
     "workerProfile": { "type": ["string", "null"] },
-    "outcomeKind": { "type": ["string", "null"] },
+    "outcomeKind": {
+      "type": ["string", "null"],
+      "enum": [
+        "succeeded",
+        "failed",
+        "timed_out",
+        "budget_exceeded",
+        "channel_error",
+        null
+      ]
+    },
     "workspaceRoot": { "type": ["string", "null"] },
     "createdAtUnixMs": { "type": "integer", "minimum": 0 }
   }

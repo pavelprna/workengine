@@ -299,4 +299,19 @@ mod tests {
         let loaded = decode_outcome(&fs::read(dir.path().join("outcome.json")).unwrap()).unwrap();
         assert_eq!(loaded.kind(), OutcomeKind::BudgetExceeded);
     }
+
+    #[test]
+    fn outcome_schema_file_matches_closed_kinds() {
+        let schema: serde_json::Value =
+            serde_json::from_str(include_str!("../../../schemas/outcome.json")).unwrap();
+        let kinds: Vec<&str> = schema["properties"]["kind"]["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        let rust: Vec<&str> = OutcomeKind::ALL.iter().map(|k| k.as_str()).collect();
+        assert_eq!(kinds, rust);
+        assert_eq!(schema["properties"]["schemaVersion"]["const"], 1);
+    }
 }

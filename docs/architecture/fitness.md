@@ -45,7 +45,7 @@ Enforced by the Cargo workspace as soon as crates exist. Clippy and `cargo deny`
 
 | ID | Invariant | Check | Status |
 | --- | --- | --- | --- |
-| F16 | Long-lived artifacts carry `schemaVersion` | schema tests | enforced |
+| F16 | Long-lived artifacts carry `schemaVersion`; `schemas/*.json` enums match the domain | schema file tests + parse tests | enforced |
 | F17 | Exit codes are a published table, not a single non-zero | CLI tests | enforced |
 
 ## Process and hygiene

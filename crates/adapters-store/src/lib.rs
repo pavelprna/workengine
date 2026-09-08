@@ -301,4 +301,27 @@ mod tests {
         assert_eq!(snapshot.workspace_root(), replayed.workspace_root());
         assert_eq!(snapshot.status(), WorkStatus::Succeeded);
     }
+
+    #[test]
+    fn event_schema_file_matches_closed_kinds() {
+        let schema: serde_json::Value =
+            serde_json::from_str(include_str!("../../../schemas/event.json")).unwrap();
+        let kinds: Vec<&str> = schema["properties"]["kind"]["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        let rust: Vec<&str> = EventKind::ALL.iter().map(|k| k.as_str()).collect();
+        assert_eq!(kinds, rust);
+        let statuses: Vec<&str> = schema["properties"]["to"]["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        let domain: Vec<&str> = WorkStatus::ALL.iter().map(|s| s.as_str()).collect();
+        assert_eq!(statuses, domain);
+        assert_eq!(schema["properties"]["schemaVersion"]["const"], 1);
+    }
 }
