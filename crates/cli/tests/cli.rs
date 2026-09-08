@@ -369,7 +369,10 @@ fn data_dir_lock_rejects_a_second_cli() {
             break;
         }
     }
-    assert!(saw_spawned, "start never emitted spawned; it must hold the lock first");
+    assert!(
+        saw_spawned,
+        "start never emitted spawned; it must hold the lock first"
+    );
     let output = bin()
         .args([
             "--data-dir",
