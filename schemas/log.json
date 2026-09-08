@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://workengine.dev/schemas/log/v1.json",
+  "title": "Workengine supervised subprocess stream record",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["schema_version", "work_id", "event"],
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "work_id": { "type": "string", "minLength": 1 },
+    "event": {
+      "type": "string",
+      "enum": ["spawned", "exited", "killed", "child_stdout", "child_stderr"]
+    },
+    "payload": { "type": "string" }
+  }
+}

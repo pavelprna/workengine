@@ -1,6 +1,7 @@
 //! Stub Worker: a real process that writes a schema-valid outcome.
 
 use std::fs;
+use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::str::FromStr;
@@ -10,6 +11,14 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use workengine_application::{AppError, RunRequest, WorkerRunner};
 use workengine_domain::{OUTCOME_SCHEMA_VERSION, Outcome, OutcomeKind};
+
+mod stream;
+
+use stream::emit;
+pub use stream::{
+    EVENT_CHILD_STDERR, EVENT_CHILD_STDOUT, EVENT_EXITED, EVENT_KILLED, EVENT_SPAWNED,
+    STREAM_EVENTS, STREAM_SCHEMA_VERSION, record_line,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StubBehavior {
@@ -102,16 +111,15 @@ fn run_writer(
     let outcome = Outcome::new(OUTCOME_SCHEMA_VERSION, kind, profile).map_err(AppError::from)?;
     let json = encode_outcome(&outcome)?;
     let dest = request.workspace_root.join("outcome.json");
-    let script = format!("printf '%s\\n' '{json}' > '{}'", dest.display());
+    let script = format!(
+        "printf '%s\\n' '{json}' > '{}'; printf '%s\\n' stub",
+        dest.display()
+    );
     let mut cmd = Command::new("sh");
     cmd.arg("-c")
         .arg(script)
-        .current_dir(request.workspace_root)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    apply_process_group(&mut cmd);
-    let mut child = cmd.spawn().map_err(AppError::worker)?;
-    match wait_child(&mut child, request.budget)? {
+        .current_dir(request.workspace_root);
+    match spawn_supervised(cmd, request.work.id().as_str(), request.budget)? {
         ChildWait::Exited => decode_outcome(&fs::read(&dest).map_err(AppError::worker)?),
         ChildWait::BudgetExceeded => {
             persist_outcome(request.workspace_root, OutcomeKind::BudgetExceeded, profile)
@@ -154,12 +162,8 @@ fn run_budget(request: &RunRequest<'_>, profile: &str) -> Result<Outcome, AppErr
     let mut cmd = Command::new("sh");
     cmd.arg("-c")
         .arg("exec sleep 30")
-        .current_dir(request.workspace_root)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    apply_process_group(&mut cmd);
-    let mut child = cmd.spawn().map_err(AppError::worker)?;
-    match wait_child(&mut child, request.budget)? {
+        .current_dir(request.workspace_root);
+    match spawn_supervised(cmd, request.work.id().as_str(), request.budget)? {
         ChildWait::BudgetExceeded => {
             persist_outcome(request.workspace_root, OutcomeKind::BudgetExceeded, profile)
         }
@@ -172,24 +176,56 @@ fn run_hang(request: &RunRequest<'_>, profile: &str) -> Result<Outcome, AppError
     let mut cmd = Command::new("sh");
     cmd.arg("-c")
         .arg("sleep 30 & echo $! > child.pid; exec sleep 30")
-        .current_dir(request.workspace_root)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .current_dir(request.workspace_root);
+    match spawn_supervised(cmd, request.work.id().as_str(), request.budget)? {
+        ChildWait::BudgetExceeded => {
+            persist_outcome(request.workspace_root, OutcomeKind::TimedOut, profile)
+        }
+        ChildWait::Exited => Err(AppError::worker("hang stub exited before budget")),
+    }
+}
+
+fn spawn_supervised(
+    mut cmd: Command,
+    work_id: &str,
+    budget: Duration,
+) -> Result<ChildWait, AppError> {
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
     apply_process_group(&mut cmd);
     let mut child = cmd.spawn().map_err(AppError::worker)?;
-    let deadline = Instant::now() + request.budget;
-    loop {
-        match child.try_wait().map_err(AppError::worker)? {
-            Some(_) => break,
-            None if Instant::now() >= deadline => {
-                kill_group(child.id());
-                let _ = child.wait();
-                return persist_outcome(request.workspace_root, OutcomeKind::TimedOut, profile);
-            }
-            None => thread::sleep(Duration::from_millis(10)),
-        }
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let out_h = drain_pipe(stdout, work_id.to_owned(), EVENT_CHILD_STDOUT);
+    let err_h = drain_pipe(stderr, work_id.to_owned(), EVENT_CHILD_STDERR);
+    emit(work_id, EVENT_SPAWNED, None);
+    let result = wait_child(&mut child, budget);
+    match &result {
+        Ok(ChildWait::BudgetExceeded) => emit(work_id, EVENT_KILLED, None),
+        Ok(ChildWait::Exited) => emit(work_id, EVENT_EXITED, None),
+        Err(_) => {}
     }
-    Err(AppError::worker("hang stub exited before budget"))
+    let _ = out_h.join();
+    let _ = err_h.join();
+    result
+}
+
+fn drain_pipe<R: Read + Send + 'static>(
+    pipe: Option<R>,
+    work_id: String,
+    event: &'static str,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let Some(pipe) = pipe else {
+            return;
+        };
+        for line in BufReader::new(pipe).lines() {
+            match line {
+                Ok(line) => emit(&work_id, event, Some(&line)),
+                Err(_) => break,
+            }
+        }
+    })
 }
 
 fn apply_process_group(cmd: &mut Command) {
@@ -313,5 +349,42 @@ mod tests {
         let rust: Vec<&str> = OutcomeKind::ALL.iter().map(|k| k.as_str()).collect();
         assert_eq!(kinds, rust);
         assert_eq!(schema["properties"]["schemaVersion"]["const"], 1);
+    }
+
+    #[test]
+    fn stream_line_carries_work_id_schema_version_and_event() {
+        let line = record_line("work-1", EVENT_SPAWNED, None);
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["schema_version"], STREAM_SCHEMA_VERSION);
+        assert_eq!(v["work_id"], "work-1");
+        assert_eq!(v["event"], EVENT_SPAWNED);
+        assert!(v.get("payload").is_none());
+        let with_payload = record_line("work-1", EVENT_CHILD_STDOUT, Some("stub"));
+        let v: serde_json::Value = serde_json::from_str(&with_payload).unwrap();
+        assert_eq!(v["payload"], "stub");
+        assert_eq!(v["work_id"], "work-1");
+    }
+
+    #[test]
+    fn log_schema_file_matches_stream_events() {
+        let schema: serde_json::Value =
+            serde_json::from_str(include_str!("../../../schemas/log.json")).unwrap();
+        let events: Vec<&str> = schema["properties"]["event"]["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(events, STREAM_EVENTS);
+        assert_eq!(schema["properties"]["schema_version"]["const"], 1);
+        let required: Vec<&str> = schema["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert!(required.contains(&"work_id"));
+        assert!(required.contains(&"event"));
+        assert!(required.contains(&"schema_version"));
     }
 }
