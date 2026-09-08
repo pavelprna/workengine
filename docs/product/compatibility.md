@@ -36,7 +36,7 @@ Changing these is not a SemVer break.
 | Help wording, man page prose | Behaviour and flags matter |
 | Worker profile names (delivery phases) | Configuration, versioned separately from the core |
 
-## Exit codes (draft)
+## Exit codes
 
 | Code | Meaning |
 | --- | --- |
