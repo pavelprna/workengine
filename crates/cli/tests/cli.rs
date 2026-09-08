@@ -337,7 +337,8 @@ fn start_emits_stream_records_with_work_id() {
 #[cfg(unix)]
 #[test]
 fn data_dir_lock_rejects_a_second_cli() {
-    use std::thread;
+    use std::io::{BufRead, BufReader};
+    use std::process::Stdio;
     use std::time::{Duration, Instant};
 
     let dir = tempfile::tempdir().unwrap();
@@ -352,31 +353,39 @@ fn data_dir_lock_rejects_a_second_cli() {
             "--work",
             &id,
         ])
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
+    let stderr = child.stderr.take().expect("piped stderr");
+    let mut lines = BufReader::new(stderr).lines();
     let deadline = Instant::now() + Duration::from_secs(2);
-    let mut conflict = None;
+    let mut saw_spawned = false;
     while Instant::now() < deadline {
-        let output = bin()
-            .args([
-                "--data-dir",
-                dir.path().to_str().unwrap(),
-                "create",
-                "--goal",
-                "other",
-            ])
-            .output()
-            .unwrap();
-        if output.status.code() == Some(11) {
-            conflict = Some(output);
+        let Some(Ok(line)) = lines.next() else {
+            break;
+        };
+        if line.contains("\"event\":\"spawned\"") {
+            saw_spawned = true;
             break;
         }
-        thread::sleep(Duration::from_millis(20));
     }
+    assert!(saw_spawned, "start never emitted spawned; it must hold the lock first");
+    let output = bin()
+        .args([
+            "--data-dir",
+            dir.path().to_str().unwrap(),
+            "create",
+            "--goal",
+            "other",
+        ])
+        .output()
+        .unwrap();
     let _ = child.kill();
     let _ = child.wait();
-    assert!(
-        conflict.is_some(),
-        "expected store conflict from a second CLI while start held the data dir"
+    assert_eq!(
+        output.status.code(),
+        Some(11),
+        "second CLI stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
