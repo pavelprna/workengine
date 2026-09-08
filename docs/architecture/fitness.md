@@ -21,7 +21,7 @@ Enforced by the Cargo workspace as soon as crates exist. Clippy and `cargo deny`
 | ID | Invariant | Check | Status |
 | --- | --- | --- | --- |
 | F6 | Illegal transition is a domain error, not a coerced status | domain unit test | [UNTESTED] |
-| F7 | `complete` is idempotent | domain / application test | [UNTESTED] |
+| F7 | `next`, `start`, `complete`, and `park` are idempotent | domain / application test | [UNTESTED] |
 | F8 | Outcome kinds are a closed enum; unknown kind is a schema error | parse test | [UNTESTED] |
 | F9 | FSM `match` is exhaustive | `cargo test` / compiler | [UNTESTED] |
 | F10 | First-slice Work statuses are `ready`, `running`, `succeeded`, `failed`, `parked` | domain enum test | [UNTESTED] |
@@ -56,6 +56,14 @@ These are not SemVer surfaces and not architecture. Canon for commits is `CONTRI
 | --- | --- | --- | --- |
 | F18 | Commits on the default branch match Conventional Commits | commit-msg hook + CI range check | [UNTESTED] |
 | F19 | `cargo deny check` is part of `just check` | `just check` | [UNTESTED] |
+
+## Operator, memory, and observation
+
+| ID | Invariant | Check | Status |
+| --- | --- | --- | --- |
+| F20 | `park` is not abort: save point and free slot, without process-group kill as the park path | worker / application test | [UNTESTED] |
+| F21 | Workspace has append-only memory; write only after a confirmed outcome | workspace test | [UNTESTED] |
+| F22 | Supervised subprocess output uses one streaming format with `work_id` | CLI / runner tests | [UNTESTED] |
 
 ## How to add a check
 
