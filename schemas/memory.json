@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://workengine.dev/schemas/memory/v1.json",
+  "title": "Workengine workspace memory line",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "workId", "status", "outcomeKind"],
+  "properties": {
+    "schemaVersion": { "type": "integer", "const": 1 },
+    "workId": { "type": "string", "minLength": 1 },
+    "status": {
+      "type": "string",
+      "enum": ["succeeded", "failed"]
+    },
+    "outcomeKind": {
+      "type": "string",
+      "enum": [
+        "succeeded",
+        "failed",
+        "timed_out",
+        "budget_exceeded",
+        "channel_error"
+      ]
+    }
+  }
+}

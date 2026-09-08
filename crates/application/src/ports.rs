@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use workengine_domain::{Outcome, Work, WorkEvent, WorkId};
+use workengine_domain::{Outcome, OutcomeKind, Work, WorkEvent, WorkId, WorkStatus};
 
 use crate::error::AppError;
 
@@ -18,7 +18,12 @@ pub trait WorkStore {
 pub trait WorkspaceFactory {
     fn bind(&self, work_id: &WorkId) -> Result<PathBuf, AppError>;
     fn read_artifact(&self, work_id: &WorkId) -> Result<Option<Vec<u8>>, AppError>;
-    fn record_memory(&self, work_id: &WorkId, entry: &str) -> Result<(), AppError>;
+    fn record_memory(
+        &self,
+        work_id: &WorkId,
+        status: WorkStatus,
+        outcome_kind: OutcomeKind,
+    ) -> Result<(), AppError>;
 }
 
 /// Spawn, wait, record. Implementations own process groups and hang detection.

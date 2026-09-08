@@ -59,7 +59,7 @@ impl WorkStore for FakeStore {
 #[derive(Default)]
 struct FakeWorkspace {
     artifacts: HashMap<String, Vec<u8>>,
-    memory: RefCell<HashMap<String, Vec<String>>>,
+    memory: RefCell<HashMap<String, Vec<(WorkStatus, OutcomeKind)>>>,
 }
 
 impl WorkspaceFactory for FakeWorkspace {
@@ -71,12 +71,18 @@ impl WorkspaceFactory for FakeWorkspace {
         Ok(self.artifacts.get(work_id.as_str()).cloned())
     }
 
-    fn record_memory(&self, work_id: &WorkId, entry: &str) -> Result<(), AppError> {
-        self.memory
-            .borrow_mut()
-            .entry(work_id.as_str().to_owned())
-            .or_default()
-            .push(entry.to_owned());
+    fn record_memory(
+        &self,
+        work_id: &WorkId,
+        status: WorkStatus,
+        outcome_kind: OutcomeKind,
+    ) -> Result<(), AppError> {
+        let mut memory = self.memory.borrow_mut();
+        let lines = memory.entry(work_id.as_str().to_owned()).or_default();
+        if lines.last() == Some(&(status, outcome_kind)) {
+            return Ok(());
+        }
+        lines.push((status, outcome_kind));
         Ok(())
     }
 }
@@ -211,6 +217,22 @@ fn complete_is_idempotent_and_does_not_append_a_second_event() {
     let outcome = Outcome::new(OUTCOME_SCHEMA_VERSION, OutcomeKind::Succeeded, "stub").unwrap();
     complete(&mut store, &ws, &clock, work.id(), &outcome).unwrap();
     assert_eq!(store.events(work.id()).unwrap().len(), n);
+    assert_eq!(ws.memory.borrow()[work.id().as_str()].len(), 1);
+}
+
+#[test]
+fn complete_retry_writes_memory_if_the_first_write_was_lost() {
+    let mut store = FakeStore::default();
+    let ws = FakeWorkspace::default();
+    let runner = FakeRunner::new(OutcomeKind::Succeeded);
+    let clock = FakeClock { unix_ms: 1 };
+    let work = ready_work(&mut store, &clock);
+    start_work(&mut store, &ws, &runner, &clock, work.id()).unwrap();
+    ws.memory.borrow_mut().clear();
+    let outcome = Outcome::new(OUTCOME_SCHEMA_VERSION, OutcomeKind::Succeeded, "stub").unwrap();
+    complete(&mut store, &ws, &clock, work.id(), &outcome).unwrap();
+    assert_eq!(ws.memory.borrow()[work.id().as_str()].len(), 1);
+    complete(&mut store, &ws, &clock, work.id(), &outcome).unwrap();
     assert_eq!(ws.memory.borrow()[work.id().as_str()].len(), 1);
 }
 

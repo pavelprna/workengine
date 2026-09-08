@@ -28,7 +28,7 @@ Even the stub is part of the product: the core must run without an LLM.
 
 ## WorkspaceFactory
 
-Creates and addresses the isolated directory for a Work.
+Creates and addresses the isolated directory for a Work. `record_memory` takes domain status and outcome kind; the adapter encodes the JSON line.
 
 | First adapter | Next |
 | --- | --- |

@@ -10,6 +10,8 @@ description = "Workengine WorkspaceFactory adapters."
 [dependencies]
 workengine-application.workspace = true
 workengine-domain.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

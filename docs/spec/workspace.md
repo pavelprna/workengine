@@ -27,6 +27,7 @@ This document is the canonical behaviour of Workspace. Keywords follow [RFC 2119
 - **[TESTED]** A workspace MUST have cumulative memory. That memory is a property of the workspace, not of a single Work run.
 - **[TESTED]** Workspace memory MUST be append-only.
 - **[TESTED]** Workengine MUST write to workspace memory only after a confirmed Work outcome. A still-running or aborted Worker MUST NOT be treated as confirmed.
+- **[TESTED]** Repeating `complete` MUST NOT append a second identical memory line. A retry after a failed memory write MUST still record the missing line.
 
 ## Related
 

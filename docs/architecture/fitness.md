@@ -62,7 +62,7 @@ These are not SemVer surfaces and not architecture. Canon for commits is `CONTRI
 | ID | Invariant | Check | Status |
 | --- | --- | --- | --- |
 | F20 | `park` is not abort: save point and free slot, without process-group kill as the park path | worker / application test | enforced |
-| F21 | Workspace has append-only memory; write only after a confirmed outcome | workspace test | enforced |
+| F21 | Workspace has append-only memory; write only after a confirmed outcome; repeat complete does not duplicate the last line | workspace / application test | enforced |
 | F22 | Supervised subprocess output uses one streaming format with `work_id` | CLI / runner tests | enforced |
 
 ## How to add a check

@@ -661,6 +661,8 @@ dependencies = [
 name = "workengine-adapters-workspace"
 version = "0.0.0"
 dependencies = [
+ "serde",
+ "serde_json",
  "tempfile",
  "workengine-application",
  "workengine-domain",

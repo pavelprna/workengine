@@ -170,6 +170,10 @@ fn complete_file_is_idempotent() {
         String::from_utf8_lossy(&again.stderr)
     );
     assert!(stdout(&again).ends_with(" succeeded"));
+    let memory =
+        std::fs::read_to_string(dir.path().join("workspaces").join(&id).join("memory.log"))
+            .unwrap();
+    assert_eq!(memory.lines().count(), 1);
 }
 
 #[test]
