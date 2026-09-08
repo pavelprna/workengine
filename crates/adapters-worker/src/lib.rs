@@ -111,13 +111,11 @@ fn run_writer(
     let outcome = Outcome::new(OUTCOME_SCHEMA_VERSION, kind, profile).map_err(AppError::from)?;
     let json = encode_outcome(&outcome)?;
     let dest = request.workspace_root.join("outcome.json");
-    let script = format!(
-        "printf '%s\\n' '{json}' > '{}'; printf '%s\\n' stub",
-        dest.display()
-    );
+    let payload = request.workspace_root.join(".outcome-payload.json");
+    fs::write(&payload, &json).map_err(AppError::worker)?;
     let mut cmd = Command::new("sh");
     cmd.arg("-c")
-        .arg(script)
+        .arg("cp .outcome-payload.json outcome.json && printf '%s\\n' stub")
         .current_dir(request.workspace_root);
     match spawn_supervised(cmd, request.work.id().as_str(), request.budget)? {
         ChildWait::Exited => decode_outcome(&fs::read(&dest).map_err(AppError::worker)?),
@@ -248,6 +246,7 @@ fn kill_group(pid: u32) {
     }
     #[cfg(not(unix))]
     {
+        // First-slice process-group teardown is Unix. See docs/product/threat-model.md.
         let _ = pid;
     }
 }
@@ -386,5 +385,28 @@ mod tests {
         assert!(required.contains(&"workId"));
         assert!(required.contains(&"event"));
         assert!(required.contains(&"schemaVersion"));
+    }
+
+    #[test]
+    fn writer_survives_quotes_in_the_worker_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = StubWorkerRunner::new(StubBehavior::Succeed);
+        let work = Work::new(
+            WorkId::parse("work-1").unwrap(),
+            WorkAttributes::new("goal", "stub's \"quoted\"").unwrap(),
+            1,
+        )
+        .unwrap();
+        let outcome = runner
+            .run(&RunRequest {
+                work: &work,
+                workspace_root: dir.path(),
+                budget: Duration::from_secs(2),
+            })
+            .unwrap();
+        assert_eq!(outcome.kind(), OutcomeKind::Succeeded);
+        assert_eq!(outcome.worker_profile(), "stub's \"quoted\"");
+        let loaded = decode_outcome(&fs::read(dir.path().join("outcome.json")).unwrap()).unwrap();
+        assert_eq!(loaded.worker_profile(), "stub's \"quoted\"");
     }
 }
