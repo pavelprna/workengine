@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Conventional Commits 1.0.0, matching CONTRIBUTING.md.
+# Types and scopes are the repo canon. Scope is optional.
+set -euo pipefail
+
+msg_file=${1:-}
+if [[ -z ${msg_file} ]]; then
+    echo "usage: commit-msg <message-file>" >&2
+    exit 1
+fi
+
+mapfile -t lines <"${msg_file}"
+subject=${lines[0]-}
+
+if [[ -z ${subject} ]]; then
+    echo "commit-msg: empty subject" >&2
+    exit 1
+fi
+
+if [[ ${subject} == Merge\ * || ${subject} == Revert\ * ]]; then
+    exit 0
+fi
+
+types='feat|fix|docs|test|refactor|perf|ci|build|chore'
+scopes='domain|application|store|worker|workspace|cli|spec|adr|arch'
+pattern="^(${types})(\((${scopes})\))?: .+"
+
+if [[ ! ${subject} =~ ${pattern} ]]; then
+    echo "commit-msg: subject must be Conventional Commits:" >&2
+    echo "  type(scope): summary" >&2
+    echo "  types: feat fix docs test refactor perf ci build chore" >&2
+    echo "  scopes: domain application store worker workspace cli spec adr arch" >&2
+    echo "  got: ${subject}" >&2
+    exit 1
+fi
+
+if [[ ${#subject} -gt 72 ]]; then
+    echo "commit-msg: subject longer than 72 characters" >&2
+    exit 1
+fi
+exit 0

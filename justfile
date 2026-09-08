@@ -23,3 +23,7 @@ test:
 
 deny:
     cargo deny check
+
+# Install the local commit-msg hook (skippable; CI cannot skip).
+hooks:
+    ln -sfn ../../scripts/commit-msg .git/hooks/commit-msg

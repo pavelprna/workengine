@@ -45,7 +45,7 @@ Atomic means one reason to revert, not one file:
 | ADR + the fitness check that enforces it | a feature plus a package rename |
 | New port + fake adapter | "also fixed indentation" |
 
-Enforcement: a `commit-msg` hook (shell or Rust, no npm) locally, and the same checker in CI on the branch range. The hook can be skipped locally; CI cannot. This is fitness F18, process hygiene, not a SemVer surface.
+Enforcement: a `commit-msg` hook (shell, no npm) locally, and the same checker in CI on the branch range. Install with `just hooks`. The hook can be skipped locally; CI cannot. This is fitness F18, process hygiene, not a SemVer surface.
 
 ## History
 
