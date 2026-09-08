@@ -24,14 +24,14 @@ The binary name is `workengine`. `workengine --help` and `workengine version` ex
 ```
 workengine create --goal "<text>" [--profile stub]
 workengine next
-workengine start --work <id>
+workengine start --work <id> [--checkout <dir>]
 workengine complete --work <id> --file outcome.json
 workengine park --work <id>
 ```
 
-`--data-dir` (or `WORKENGINE_DATA_DIR`) selects the SQLite store and workspace directories. Default: `.workengine`.
+`--data-dir` (or `WORKENGINE_DATA_DIR`) selects the SQLite store and workspace directories. Default: `.workengine`. `--config` (or `WORKENGINE_CONFIG`) is a TOML file of Worker profiles. Env values in that file are `{ fromEnv = "NAME" }` only.
 
-`start` is the happy path: bind a workspace, spawn the stub Worker, wait, and apply `complete`. `complete --file` recovers leftover `running` or `parked` Work from an outcome artifact (including after `next` auto-parked a crash). The CLI does not ask a model which Work or which next status to take.
+`start` is the happy path: bind a workspace, write the goal, optionally copy `--checkout`, spawn the Worker, wait, and apply `complete`. Default Worker is the stub (`--profile stub`). A TOML `--config` (or `WORKENGINE_CONFIG`) supplies argv and env references for any other profile name. `complete --file` recovers leftover `running` or `parked` Work from an outcome artifact (including after `next` auto-parked a crash). The CLI does not ask a model which Work or which next status to take.
 
 Crate layers: `workengine-domain` through `workengine-cli`. Run `just check` as in [CONTRIBUTING.md](CONTRIBUTING.md).
 

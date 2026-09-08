@@ -14,7 +14,7 @@ These are public contracts. A breaking change is a major version, plus a migrati
 | --- | --- |
 | CLI command names (`create`, `next`, `start`, `complete`, `park`, `version`) | Stable |
 | CLI `version` prefix | `workengine <semver>` where semver is `CARGO_PKG_VERSION` |
-| CLI flags and env vars documented in `--help` | Stable |
+| CLI flags and env vars documented in `--help` | Stable (`--config` / `WORKENGINE_CONFIG`, `start --checkout`) |
 | Process exit codes | Stable; see table below |
 | Outcome JSON schema (`schemaVersion`) | Stable within a major; unknown fields must fail closed or be reserved |
 | Store artifact schema (`schemaVersion`) | Stable within a major; breaking change requires a migrator |
