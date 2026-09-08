@@ -318,10 +318,10 @@ fn start_emits_stream_records_with_work_id() {
         String::from_utf8_lossy(&start.stderr)
     );
     for rec in &records {
-        assert_eq!(rec["schema_version"], 1, "{rec}");
-        let work_id = rec["work_id"]
+        assert_eq!(rec["schemaVersion"], 1, "{rec}");
+        let work_id = rec["workId"]
             .as_str()
-            .unwrap_or_else(|| panic!("missing work_id: {rec}"));
+            .unwrap_or_else(|| panic!("missing workId: {rec}"));
         assert_eq!(work_id, id, "{rec}");
         assert!(
             rec["event"].as_str().is_some_and(|e| !e.is_empty()),

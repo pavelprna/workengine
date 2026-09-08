@@ -3,11 +3,11 @@
   "$id": "https://workengine.dev/schemas/log/v1.json",
   "title": "Workengine supervised subprocess stream record",
   "type": "object",
-  "additionalProperties": true,
-  "required": ["schema_version", "work_id", "event"],
+  "additionalProperties": false,
+  "required": ["schemaVersion", "workId", "event"],
   "properties": {
-    "schema_version": { "type": "integer", "const": 1 },
-    "work_id": { "type": "string", "minLength": 1 },
+    "schemaVersion": { "type": "integer", "const": 1 },
+    "workId": { "type": "string", "minLength": 1 },
     "event": {
       "type": "string",
       "enum": ["spawned", "exited", "killed", "child_stdout", "child_stderr"]

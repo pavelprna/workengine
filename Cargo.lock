@@ -653,7 +653,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "tracing",
  "workengine-application",
  "workengine-domain",
 ]

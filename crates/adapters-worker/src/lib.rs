@@ -355,14 +355,14 @@ mod tests {
     fn stream_line_carries_work_id_schema_version_and_event() {
         let line = record_line("work-1", EVENT_SPAWNED, None);
         let v: serde_json::Value = serde_json::from_str(&line).unwrap();
-        assert_eq!(v["schema_version"], STREAM_SCHEMA_VERSION);
-        assert_eq!(v["work_id"], "work-1");
+        assert_eq!(v["schemaVersion"], STREAM_SCHEMA_VERSION);
+        assert_eq!(v["workId"], "work-1");
         assert_eq!(v["event"], EVENT_SPAWNED);
         assert!(v.get("payload").is_none());
         let with_payload = record_line("work-1", EVENT_CHILD_STDOUT, Some("stub"));
         let v: serde_json::Value = serde_json::from_str(&with_payload).unwrap();
         assert_eq!(v["payload"], "stub");
-        assert_eq!(v["work_id"], "work-1");
+        assert_eq!(v["workId"], "work-1");
     }
 
     #[test]
@@ -376,15 +376,15 @@ mod tests {
             .map(|v| v.as_str().unwrap())
             .collect();
         assert_eq!(events, STREAM_EVENTS);
-        assert_eq!(schema["properties"]["schema_version"]["const"], 1);
+        assert_eq!(schema["properties"]["schemaVersion"]["const"], 1);
         let required: Vec<&str> = schema["required"]
             .as_array()
             .unwrap()
             .iter()
             .map(|v| v.as_str().unwrap())
             .collect();
-        assert!(required.contains(&"work_id"));
+        assert!(required.contains(&"workId"));
         assert!(required.contains(&"event"));
-        assert!(required.contains(&"schema_version"));
+        assert!(required.contains(&"schemaVersion"));
     }
 }

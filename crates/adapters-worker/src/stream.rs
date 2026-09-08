@@ -1,9 +1,11 @@
 //! One JSON stream for Workengine-supervised subprocess output (F22).
+//!
+//! Artifacts and this stream use the same camelCase JSON dialect.
+//! The stream is JSON lines on stderr only.
 
 use std::io::{self, Write};
 
 use serde::Serialize;
-use tracing::info;
 
 pub const STREAM_SCHEMA_VERSION: u32 = 1;
 pub const EVENT_SPAWNED: &str = "spawned";
@@ -22,7 +24,9 @@ pub const STREAM_EVENTS: &[&str] = &[
 
 #[derive(Serialize)]
 struct StreamRecord<'a> {
+    #[serde(rename = "schemaVersion")]
     schema_version: u32,
+    #[serde(rename = "workId")]
     work_id: &'a str,
     event: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -40,13 +44,6 @@ pub fn record_line(work_id: &str, event: &str, payload: Option<&str>) -> String 
 }
 
 pub(crate) fn emit(work_id: &str, event: &str, payload: Option<&str>) {
-    info!(
-        schema_version = STREAM_SCHEMA_VERSION,
-        work_id,
-        event,
-        payload = payload.unwrap_or(""),
-        "worker stream"
-    );
     let line = record_line(work_id, event, payload);
     let _ = writeln!(io::stderr(), "{line}");
 }

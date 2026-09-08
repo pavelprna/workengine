@@ -18,6 +18,8 @@ These are public contracts. A breaking change is a major version, plus a migrati
 | Process exit codes | Stable; see table below |
 | Outcome JSON schema (`schemaVersion`) | Stable within a major; unknown fields must fail closed or be reserved |
 | Store artifact schema (`schemaVersion`) | Stable within a major; breaking change requires a migrator |
+| Workspace memory line schema (`schemaVersion`) | Stable within a major |
+| Supervised subprocess stream record (`schemaVersion`, camelCase) | Stable within a major; same JSON dialect as outcome and event |
 | Domain status and outcome enumerations that appear in those schemas (`ready`, `running`, `succeeded`, `failed`, `parked`; outcome kinds in [../spec/worker.md](../spec/worker.md)) | Stable |
 
 ## Not covered
@@ -26,7 +28,7 @@ Changing these is not a SemVer break.
 
 | Surface | Notes |
 | --- | --- |
-| Log line text | Structured fields (`work_id`, `event`, `schema_version`) are the contract, not the message |
+| Log line text | Structured fields (`workId`, `event`, `schemaVersion`) are the contract, not the message |
 | Optional ` (<git sha>)` on `version` | Forensic build id when compiled from git; not a version scheme |
 | JSON key order | Parsers MUST NOT depend on order |
 | Internal crate and module names | `workengine-domain` is not a public library API |
