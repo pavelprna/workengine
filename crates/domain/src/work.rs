@@ -67,6 +67,23 @@ impl Work {
         })
     }
 
+    /// Load a persisted snapshot. Not a transition; the store is the writer.
+    pub fn restore(
+        id: WorkId,
+        status: WorkStatus,
+        attributes: WorkAttributes,
+        workspace_root: Option<String>,
+        created_at_unix_ms: u64,
+    ) -> Self {
+        Self {
+            id,
+            status,
+            attributes,
+            workspace_root,
+            created_at_unix_ms,
+        }
+    }
+
     pub fn id(&self) -> &WorkId {
         &self.id
     }

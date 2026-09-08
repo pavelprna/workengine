@@ -30,8 +30,8 @@ Enforced by the Cargo workspace as soon as crates exist. Clippy and `cargo deny`
 
 | ID | Invariant | Check | Status |
 | --- | --- | --- | --- |
-| F11 | Status update and event append are atomic | store test | [UNTESTED] |
-| F12 | Replay reconstructs status | store test | [UNTESTED] |
+| F11 | Status update and event append are atomic | store test | enforced |
+| F12 | Replay reconstructs status | store test | enforced |
 
 ## Worker and workspace
 
