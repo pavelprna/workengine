@@ -1,0 +1,15 @@
+[package]
+name = "workengine-adapters-worker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+description = "Workengine WorkerRunner adapters."
+
+[dependencies]
+workengine-application.workspace = true
+workengine-domain.workspace = true
+
+[lints]
+workspace = true

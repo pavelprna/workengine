@@ -17,7 +17,9 @@ The core knows four nouns. Everything else is an adapter.
 
 If domain code branches on an agent or tracker product name, the layer is wrong.
 
-## CLI (intended)
+## CLI
+
+The binary name is `workengine`. The first runtime slice will expose:
 
 ```
 workengine next
@@ -29,7 +31,7 @@ workengine version
 
 The CLI does not ask a model which Work or which next status to take.
 
-Runtime crates are not in this repository yet. The constitution (spec, architecture, ADRs) is.
+Crate layers exist (`workengine-domain` through `workengine-cli`). Domain types and use cases are not in this slice. Run `just check` as in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## What this is not
 

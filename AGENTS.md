@@ -26,7 +26,7 @@ This file is the agent entry. It does not copy the spec.
 
 ## Check
 
-When the Cargo workspace exists, `just check` (or `make check`) is mandatory before you finish. It is what CI will run. Until that target exists, do not invent a toolchain or a second spec process.
+`just check` is mandatory before you finish. It is what CI will run. Do not invent a second toolchain or spec process.
 
 ## Commits
 

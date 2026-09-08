@@ -1,6 +1,6 @@
 # Fitness functions
 
-A fitness function is an automated check that fails CI (and `just check`, once the workspace exists) when an invariant is violated. Prose is not a fitness function.
+A fitness function is an automated check that fails CI and `just check` when an invariant is violated. Prose is not a fitness function.
 
 Accepted architecture ADRs that can be checked by a machine MUST have a row here. Process and toolchain hygiene (commit messages, `cargo deny`) may also have rows; they do not require an ADR. Until the check exists, the row stays `[UNTESTED]`.
 
@@ -10,11 +10,11 @@ Enforced by the Cargo workspace as soon as crates exist. Clippy and `cargo deny`
 
 | ID | Invariant | Check | Status |
 | --- | --- | --- | --- |
-| F1 | `workengine-domain` does not depend on application, adapters, or cli | Cargo.toml graph / `cargo check --workspace` | [UNTESTED] |
-| F2 | `workengine-application` does not depend on adapters or cli | Cargo.toml graph | [UNTESTED] |
-| F3 | `workengine-domain` does not use filesystem, process, or network APIs | clippy `disallowed_methods` / `disallowed_types` | [UNTESTED] |
+| F1 | `workengine-domain` does not depend on application, adapters, or cli | Cargo.toml graph / `cargo check --workspace` | enforced |
+| F2 | `workengine-application` does not depend on adapters or cli | Cargo.toml graph | enforced |
+| F3 | `workengine-domain` does not use filesystem, process, or network APIs | `crates/domain/clippy.toml` / clippy `disallowed_methods` / `disallowed_types` | enforced |
 | F4 | `workengine-domain` contains no product or tracker names | review + grep in architecture tests when they exist | [UNTESTED] |
-| F5 | `workengine-application` does not spawn processes or open sockets | clippy + crate graph | [UNTESTED] |
+| F5 | `workengine-application` does not spawn processes or open sockets | `crates/application/clippy.toml` / clippy + crate graph | enforced |
 
 ## Domain behaviour
 
@@ -55,7 +55,7 @@ These are not SemVer surfaces and not architecture. Canon for commits is `CONTRI
 | ID | Invariant | Check | Status |
 | --- | --- | --- | --- |
 | F18 | Commits on the default branch match Conventional Commits | commit-msg hook + CI range check | [UNTESTED] |
-| F19 | `cargo deny check` is part of `just check` | `just check` | [UNTESTED] |
+| F19 | `cargo deny check` is part of `just check` | `just check` | enforced |
 
 ## Operator, memory, and observation
 

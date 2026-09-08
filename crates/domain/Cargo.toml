@@ -1,0 +1,11 @@
+[package]
+name = "workengine-domain"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+description = "Workengine domain: identifiers, FSM, closed outcomes. No I/O."
+
+[lints]
+workspace = true

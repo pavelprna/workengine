@@ -1,0 +1,47 @@
+# F3: domain has no filesystem, process, or network APIs.
+# Keep this file in this crate. A workspace-root clippy.toml would also
+# ban std::process in the worker adapter.
+
+disallowed-types = [
+  { path = "std::fs::File", reason = "domain has no filesystem I/O" },
+  { path = "std::fs::OpenOptions", reason = "domain has no filesystem I/O" },
+  { path = "std::fs::ReadDir", reason = "domain has no filesystem I/O" },
+  { path = "std::process::Command", reason = "domain does not spawn processes" },
+  { path = "std::process::Child", reason = "domain does not spawn processes" },
+  { path = "std::process::Stdio", reason = "domain does not spawn processes" },
+  { path = "std::net::TcpStream", reason = "domain has no network I/O" },
+  { path = "std::net::TcpListener", reason = "domain has no network I/O" },
+  { path = "std::net::UdpSocket", reason = "domain has no network I/O" },
+  { path = "std::os::unix::net::UnixStream", reason = "domain has no network I/O" },
+  { path = "std::os::unix::net::UnixListener", reason = "domain has no network I/O" },
+]
+
+disallowed-methods = [
+  { path = "std::fs::read", reason = "domain has no filesystem I/O" },
+  { path = "std::fs::read_to_string", reason = "domain has no filesystem I/O" },
+  { path = "std::fs::write", reason = "domain has no filesystem I/O" },
+  { path = "std::fs::copy", reason = "domain has no filesystem I/O" },
+  { path = "std::fs::rename", reason = "domain has no filesystem I/O" },
+  { path = "std::fs::remove_file", reason = "domain has no filesystem I/O" },
+  { path = "std::fs::remove_dir", reason = "domain has no filesystem I/O" },
+  { path = "std::fs::remove_dir_all", reason = "domain has no filesystem I/O" },
+  { path = "std::fs::create_dir", reason = "domain has no filesystem I/O" },
+  { path = "std::fs::create_dir_all", reason = "domain has no filesystem I/O" },
+  { path = "std::fs::read_dir", reason = "domain has no filesystem I/O" },
+  { path = "std::fs::metadata", reason = "domain has no filesystem I/O" },
+  { path = "std::fs::symlink_metadata", reason = "domain has no filesystem I/O" },
+  { path = "std::fs::canonicalize", reason = "domain has no filesystem I/O" },
+  { path = "std::fs::hard_link", reason = "domain has no filesystem I/O" },
+  { path = "std::fs::read_link", reason = "domain has no filesystem I/O" },
+  { path = "std::fs::set_permissions", reason = "domain has no filesystem I/O" },
+  { path = "std::fs::exists", reason = "domain has no filesystem I/O" },
+  { path = "std::fs::File::open", reason = "domain has no filesystem I/O" },
+  { path = "std::fs::File::create", reason = "domain has no filesystem I/O" },
+  { path = "std::fs::File::create_new", reason = "domain has no filesystem I/O" },
+  { path = "std::process::Command::new", reason = "domain does not spawn processes" },
+  { path = "std::process::exit", reason = "domain does not spawn processes" },
+  { path = "std::process::abort", reason = "domain does not spawn processes" },
+  { path = "std::net::TcpStream::connect", reason = "domain has no network I/O" },
+  { path = "std::net::TcpListener::bind", reason = "domain has no network I/O" },
+  { path = "std::net::UdpSocket::bind", reason = "domain has no network I/O" },
+]

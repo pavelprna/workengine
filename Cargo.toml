@@ -1,0 +1,31 @@
+[workspace]
+resolver = "3"
+members = [
+  "crates/domain",
+  "crates/application",
+  "crates/adapters-store",
+  "crates/adapters-worker",
+  "crates/adapters-workspace",
+  "crates/cli",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+rust-version = "1.98.1"
+
+[workspace.dependencies]
+workengine-domain = { path = "crates/domain", version = "0.0.0" }
+workengine-application = { path = "crates/application", version = "0.0.0" }
+workengine-adapters-store = { path = "crates/adapters-store", version = "0.0.0" }
+workengine-adapters-worker = { path = "crates/adapters-worker", version = "0.0.0" }
+workengine-adapters-workspace = { path = "crates/adapters-workspace", version = "0.0.0" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+disallowed_methods = "deny"
+disallowed_types = "deny"

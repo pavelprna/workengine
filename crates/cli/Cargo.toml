@@ -1,0 +1,21 @@
+[package]
+name = "workengine-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+description = "Workengine CLI composition root."
+
+[[bin]]
+name = "workengine"
+path = "src/main.rs"
+
+[dependencies]
+workengine-application.workspace = true
+workengine-adapters-store.workspace = true
+workengine-adapters-worker.workspace = true
+workengine-adapters-workspace.workspace = true
+
+[lints]
+workspace = true

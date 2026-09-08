@@ -1,0 +1,22 @@
+# F5: application does not spawn processes or open sockets.
+# WorkerRunner and Clock live behind ports; adapters own I/O.
+
+disallowed-types = [
+  { path = "std::process::Command", reason = "application does not spawn processes" },
+  { path = "std::process::Child", reason = "application does not spawn processes" },
+  { path = "std::process::Stdio", reason = "application does not spawn processes" },
+  { path = "std::net::TcpStream", reason = "application does not open sockets" },
+  { path = "std::net::TcpListener", reason = "application does not open sockets" },
+  { path = "std::net::UdpSocket", reason = "application does not open sockets" },
+  { path = "std::os::unix::net::UnixStream", reason = "application does not open sockets" },
+  { path = "std::os::unix::net::UnixListener", reason = "application does not open sockets" },
+]
+
+disallowed-methods = [
+  { path = "std::process::Command::new", reason = "application does not spawn processes" },
+  { path = "std::process::exit", reason = "application does not spawn processes" },
+  { path = "std::process::abort", reason = "application does not spawn processes" },
+  { path = "std::net::TcpStream::connect", reason = "application does not open sockets" },
+  { path = "std::net::TcpListener::bind", reason = "application does not open sockets" },
+  { path = "std::net::UdpSocket::bind", reason = "application does not open sockets" },
+]

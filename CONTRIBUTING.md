@@ -55,11 +55,16 @@ Release versioning (tags `vX.Y.Z`) is a product decision in `docs/product/compat
 
 ## Check
 
-Once the workspace lands, the only local interface is `just check` (or `make check` if that is the file we add). Same steps as CI. Do not put logic only in a host's YAML.
+The only local interface is `just check`. Same steps as CI. Do not put logic only in a host's YAML. Format and lints are not negotiated in review.
 
-Until that target exists, this repository is constitution only: no runtime crate, no invented build tool.
+`just check` runs `cargo fmt --all -- --check`, `cargo clippy --locked --workspace --all-targets -- -D warnings`, `cargo test --locked --workspace`, and `cargo deny check`.
 
-Planned `check` (stage 1): `cargo fmt --check`, `cargo clippy --locked -- -D warnings`, `cargo test --workspace`, `cargo deny check`. Format and lints are not negotiated in review.
+`just` and `cargo-deny` must be on `PATH`. With the pinned toolchain:
+
+```
+. "$HOME/.cargo/env"
+cargo install just cargo-deny --locked
+```
 
 ## Architecture
 
