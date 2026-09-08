@@ -19,6 +19,13 @@ pub enum EventKind {
 }
 
 impl EventKind {
+    pub const ALL: [EventKind; 4] = [
+        EventKind::Created,
+        EventKind::Started,
+        EventKind::Completed,
+        EventKind::Parked,
+    ];
+
     pub fn as_str(self) -> &'static str {
         match self {
             EventKind::Created => "created",
@@ -264,5 +271,26 @@ mod tests {
         assert_eq!(replayed.status(), WorkStatus::Succeeded);
         assert_eq!(replayed.workspace_root(), Some("/tmp/w"));
         assert_eq!(replayed.id().as_str(), "work-1");
+    }
+
+    #[test]
+    fn replay_complete_from_parked_skips_a_second_start() {
+        let mut work = sample();
+        let created = WorkEvent::created(&work);
+        let from_ready = work.status();
+        work.start().unwrap();
+        work.bind_workspace("/tmp/w");
+        let started = WorkEvent::started(&work, from_ready);
+        let from_running = work.status();
+        work.park().unwrap();
+        let parked = WorkEvent::parked(&work, from_running);
+        let outcome = Outcome::new(1, OutcomeKind::Succeeded, "stub").unwrap();
+        let from_parked = work.status();
+        work.complete(&outcome).unwrap();
+        let completed = WorkEvent::completed(&work, from_parked, OutcomeKind::Succeeded);
+
+        let replayed = replay(&[created, started, parked, completed]).unwrap();
+        assert_eq!(replayed.status(), WorkStatus::Succeeded);
+        assert_eq!(replayed.workspace_root(), Some("/tmp/w"));
     }
 }

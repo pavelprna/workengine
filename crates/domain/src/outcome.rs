@@ -17,6 +17,14 @@ pub enum OutcomeKind {
 }
 
 impl OutcomeKind {
+    pub const ALL: [OutcomeKind; 5] = [
+        OutcomeKind::Succeeded,
+        OutcomeKind::Failed,
+        OutcomeKind::TimedOut,
+        OutcomeKind::BudgetExceeded,
+        OutcomeKind::ChannelError,
+    ];
+
     pub fn as_str(self) -> &'static str {
         match self {
             OutcomeKind::Succeeded => "succeeded",
@@ -124,5 +132,20 @@ mod tests {
             assert_eq!(kind.to_status(), WorkStatus::Failed);
         }
         assert_eq!(OutcomeKind::Succeeded.to_status(), WorkStatus::Succeeded);
+    }
+
+    #[test]
+    fn first_slice_kinds_are_exactly_the_five() {
+        let names: Vec<&str> = OutcomeKind::ALL.iter().map(|k| k.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "succeeded",
+                "failed",
+                "timed_out",
+                "budget_exceeded",
+                "channel_error"
+            ]
+        );
     }
 }

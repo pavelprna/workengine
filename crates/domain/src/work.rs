@@ -128,11 +128,12 @@ impl Work {
         }
     }
 
-    /// `running` → succeeded or failed from a closed outcome. Repeat is idempotent.
+    /// `running` or leftover `parked` → succeeded or failed from a closed outcome.
+    /// Repeat of the same terminal is idempotent.
     pub fn complete(&mut self, outcome: &Outcome) -> Result<Apply, DomainError> {
         let to = outcome.kind().to_status();
         match self.status {
-            WorkStatus::Running => {
+            WorkStatus::Running | WorkStatus::Parked => {
                 let from = self.status;
                 self.status = to;
                 Ok(Apply::Changed { from, to })
@@ -314,6 +315,15 @@ mod tests {
                 status: WorkStatus::Parked,
             }
         );
+    }
+
+    #[test]
+    fn parked_complete_is_recovery_without_a_second_start() {
+        let mut w = work();
+        w.start().unwrap();
+        w.park().unwrap();
+        w.complete(&outcome(OutcomeKind::Succeeded)).unwrap();
+        assert_eq!(w.status(), WorkStatus::Succeeded);
     }
 
     #[test]

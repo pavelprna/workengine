@@ -21,8 +21,10 @@ First-slice transitions. Status names are defined in [work.md](work.md). Workeng
 | `running` | `succeeded` | `complete` after a succeeded outcome |
 | `running` | `failed` | `complete` after a failed, timed-out, budget-exceeded, or fail-closed channel outcome |
 | `running` | `parked` | `park` |
+| `parked` | `succeeded` | `complete` after a succeeded outcome (recovery of leftover Work) |
+| `parked` | `failed` | `complete` after a failed, timed-out, budget-exceeded, or fail-closed channel outcome (recovery) |
 
-- **[UNTESTED]** A transition MUST be one of the rows above, or a domain error.
+- **[TESTED]** A transition MUST be one of the rows above, or a domain error.
 
 ## Operations
 
@@ -34,7 +36,7 @@ The first CLI slice exposes `create`, `next`, `start`, `complete`, and `park`. T
 - **[UNTESTED]** `start` MUST bind a Workspace and spawn a Worker only when the Work is `ready` or `parked` and the FSM allows it. The Work then becomes `running`.
 - **[UNTESTED]** After the Worker process exits, `start` MUST apply `complete` from the closed outcome. The CLI happy path is one `start` invocation: spawn, wait, record.
 - **[UNTESTED]** `complete` MUST apply a closed outcome and persist status plus event atomically, following the table above.
-- **[UNTESTED]** `complete` as a CLI verb (`complete --file`) MUST exist for recovery: Work still `running`, outcome artifact already written, control plane restarting before the status was committed.
+- **[UNTESTED]** `complete` as a CLI verb (`complete --file`) MUST exist for recovery: leftover `running` or `parked` Work, outcome artifact already written, control plane restarting before the status was committed.
 - **[UNTESTED]** If a workspace already contains a confirmed-looking outcome artifact after a leftover `running` Work was parked, `start` MUST apply `complete` from that artifact and MUST NOT spawn a second Worker.
 - **[UNTESTED]** Repeating `next`, `start`, `complete`, or `park` on the same Work MUST NOT duplicate effects: no second spawn, no second status transition, no second event.
 - **[UNTESTED]** `park` MUST pause without losing progress: reach a save point, leave the Worker slot, and leave the Work `parked`.
@@ -55,7 +57,7 @@ The first CLI slice exposes `create`, `next`, `start`, `complete`, and `park`. T
 - **[UNTESTED]** Every long-lived artifact MUST carry `schemaVersion`.
 - **[UNTESTED]** On Workengine restart, Work in an unconfirmed state MUST return to the queue automatically (resume from the failure point, not from the beginning of the Work).
 - **[UNTESTED]** First-slice unconfirmed state is Work whose status is `running` and that has no committed `Completed` event. The next CLI invocation other than `complete` MUST `park` that Work. The workspace directory is the save point. There is no `running` → `ready` transition.
-- **[UNTESTED]** `complete --file` MUST apply to leftover `running` Work and MUST NOT park it first.
+- **[TESTED]** `complete --file` MUST apply to leftover `running` or leftover `parked` Work and MUST NOT park it first.
 
 ## Publication and observation
 
