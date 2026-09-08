@@ -9,7 +9,11 @@ checker=${root}/scripts/commit-msg
 base=${1:-}
 
 if [[ -z ${base} ]]; then
-    if git rev-parse --verify origin/main >/dev/null 2>&1; then
+    if git rev-parse --verify origin/master >/dev/null 2>&1; then
+        base=origin/master
+    elif git rev-parse --verify master >/dev/null 2>&1; then
+        base=master
+    elif git rev-parse --verify origin/main >/dev/null 2>&1; then
         base=origin/main
     elif git rev-parse --verify main >/dev/null 2>&1; then
         base=main
