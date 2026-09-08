@@ -54,6 +54,9 @@ struct EventPayload {
 }
 
 pub struct SqliteStore {
+    // Lock is declared first so it is released after the SQLite connection.
+    #[cfg(unix)]
+    _lock: nix::fcntl::Flock<std::fs::File>,
     conn: Connection,
 }
 
@@ -61,9 +64,15 @@ impl SqliteStore {
     pub fn open(data_dir: impl AsRef<Path>) -> Result<Self, AppError> {
         let data_dir = data_dir.as_ref();
         std::fs::create_dir_all(data_dir).map_err(AppError::store)?;
+        #[cfg(unix)]
+        let lock = acquire_lock(data_dir)?;
         let conn = Connection::open(data_dir.join("workengine.sqlite")).map_err(AppError::store)?;
         migrate(&conn)?;
-        Ok(Self { conn })
+        Ok(Self {
+            #[cfg(unix)]
+            _lock: lock,
+            conn,
+        })
     }
 
     fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkRow> {
@@ -159,6 +168,23 @@ impl WorkStore for SqliteStore {
         tx.commit().map_err(AppError::store)?;
         Ok(())
     }
+}
+
+#[cfg(unix)]
+fn acquire_lock(data_dir: &Path) -> Result<nix::fcntl::Flock<std::fs::File>, AppError> {
+    use std::fs::OpenOptions;
+
+    use nix::fcntl::{Flock, FlockArg};
+
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(data_dir.join("lock"))
+        .map_err(AppError::store)?;
+    Flock::lock(file, FlockArg::LockExclusiveNonblock)
+        .map_err(|_| AppError::Conflict(format!("data directory in use: {}", data_dir.display())))
 }
 
 fn migrate(conn: &Connection) -> Result<(), AppError> {
@@ -406,5 +432,17 @@ mod tests {
             err,
             AppError::Domain(workengine_domain::DomainError::UnsupportedSchemaVersion(2))
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn second_open_of_the_same_data_dir_is_a_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let _first = SqliteStore::open(dir.path()).unwrap();
+        let err = match SqliteStore::open(dir.path()) {
+            Ok(_) => panic!("expected a second open of the same data dir to fail"),
+            Err(err) => err,
+        };
+        assert!(matches!(err, AppError::Conflict(_)));
     }
 }

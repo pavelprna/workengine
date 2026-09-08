@@ -333,3 +333,50 @@ fn start_emits_stream_records_with_work_id() {
     assert!(events.contains(&"exited"), "{events:?}");
     assert!(events.contains(&"child_stdout"), "{events:?}");
 }
+
+#[cfg(unix)]
+#[test]
+fn data_dir_lock_rejects_a_second_cli() {
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    let dir = tempfile::tempdir().unwrap();
+    let id = create_work(dir.path());
+    let mut child = bin()
+        .env("WORKENGINE_STUB_BEHAVIOR", "hang")
+        .env("WORKENGINE_BUDGET_MS", "4000")
+        .args([
+            "--data-dir",
+            dir.path().to_str().unwrap(),
+            "start",
+            "--work",
+            &id,
+        ])
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut conflict = None;
+    while Instant::now() < deadline {
+        let output = bin()
+            .args([
+                "--data-dir",
+                dir.path().to_str().unwrap(),
+                "create",
+                "--goal",
+                "other",
+            ])
+            .output()
+            .unwrap();
+        if output.status.code() == Some(11) {
+            conflict = Some(output);
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(
+        conflict.is_some(),
+        "expected store conflict from a second CLI while start held the data dir"
+    );
+}

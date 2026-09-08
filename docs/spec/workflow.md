@@ -41,6 +41,7 @@ The first CLI slice exposes `create`, `next`, `start`, `complete`, and `park`. T
 - **[TESTED]** Repeating `next`, `complete`, or `park` on the same Work MUST NOT duplicate effects: no second spawn, no second status transition, no second event. Repeating `start` MUST NOT spawn twice: a leftover artifact completes without spawn (idempotent if already terminal); `start` on already-`running` or terminal Work without an artifact is an illegal transition.
 - **[TESTED]** `park` MUST pause without losing progress: reach a save point, leave the Worker slot, and leave the Work `parked`.
 - **[TESTED]** First-slice CLI is a single writer and is not a daemon. `park` MUST NOT require a second Workengine process signalling a Worker that `start` is still waiting on. Concurrent pause of an in-flight wait is not this slice.
+- **[TESTED]** The first-slice CLI MUST hold an exclusive lock on the data directory for the life of the process. A second invocation on the same data directory MUST fail as a store conflict. It MUST NOT park or complete Work that another process is running. Process-group teardown and this lock are Unix in this slice.
 - **[TESTED]** `park` MUST NOT be abort. Abort, timeout, and hang MUST terminate the process group without treating that path as a save-point pause. `park` MUST reach a save point; abort MUST NOT be required to.
 - **[TESTED]** Parked Work MUST NOT spin, poll, or occupy a Worker slot.
 - **[TESTED]** An answer to a park MUST continue the same Work. It MUST NOT create a new Work.

@@ -636,6 +636,7 @@ dependencies = [
 name = "workengine-adapters-store"
 version = "0.0.0"
 dependencies = [
+ "nix",
  "rusqlite",
  "serde",
  "serde_json",

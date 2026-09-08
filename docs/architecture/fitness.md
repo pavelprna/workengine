@@ -32,6 +32,7 @@ Enforced by the Cargo workspace as soon as crates exist. Clippy and `cargo deny`
 | --- | --- | --- | --- |
 | F11 | Status update and event append are atomic | store test | enforced |
 | F12 | Replay reconstructs status | store test | enforced |
+| F23 | Two CLI processes MUST NOT share a data directory: exclusive lock, second open is a store conflict | store test + CLI test (Unix) | enforced |
 
 ## Worker and workspace
 
