@@ -31,8 +31,9 @@ The first CLI slice exposes `next`, `start`, `complete`, and `park`. Their rules
 - **[UNTESTED]** `next` MUST select Work according to the store and the FSM, not by asking a model which item or phase to take.
 - **[UNTESTED]** `start` MUST bind a Workspace and spawn a Worker only when the Work is `ready` or `parked` and the FSM allows it. The Work then becomes `running`.
 - **[UNTESTED]** `complete` MUST apply a closed outcome and persist status plus event atomically, following the table above.
-- **[UNTESTED]** `complete` MUST be idempotent: repeating the same completion on the same Work MUST NOT duplicate effects.
+- **[UNTESTED]** Repeating `next`, `start`, `complete`, or `park` on the same Work MUST NOT duplicate effects: no second spawn, no second status transition, no second event.
 - **[UNTESTED]** `park` MUST pause without losing progress: reach a save point, leave the Worker slot, and leave the Work `parked`.
+- **[UNTESTED]** `park` MUST NOT be abort. Abort, timeout, and hang MUST terminate the process group without treating that path as a save-point pause. `park` MUST reach a save point; abort MUST NOT be required to.
 - **[UNTESTED]** Parked Work MUST NOT spin, poll, or occupy a Worker slot.
 - **[UNTESTED]** An answer to a park MUST continue the same Work. It MUST NOT create a new Work.
 - **[UNTESTED]** Every Work lifecycle MUST be interruptible by an operator.
@@ -55,7 +56,8 @@ The first CLI slice exposes `next`, `start`, `complete`, and `park`. Their rules
 - **[UNTESTED]** Any two observers MUST see the same snapshot of a given Work.
 - **[UNTESTED]** A subscription to the event stream MUST be resumable without loss and without duplicates.
 - **[UNTESTED]** A Work summary MUST be structured. Operators MUST NOT have to parse raw logs to know status.
-- **[UNTESTED]** Each Worker run MUST emit a mandatory set of accounting fields, including `work_id`.
+- **[UNTESTED]** Output of every Workengine-supervised subprocess, including the Worker, MUST use one streaming format.
+- **[UNTESTED]** Each record in that stream MUST carry a mandatory set of accounting fields, including `work_id`.
 - **[UNTESTED]** Navigation from a summary to raw artifacts MUST be a finite number of steps. Each significant step MUST leave a visible proof artifact.
 
 ## Operator park notifications
