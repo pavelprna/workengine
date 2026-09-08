@@ -16,6 +16,7 @@ workengine-application.workspace = true
 workengine-adapters-store.workspace = true
 workengine-adapters-worker.workspace = true
 workengine-adapters-workspace.workspace = true
+clap.workspace = true
 
 [lints]
 workspace = true

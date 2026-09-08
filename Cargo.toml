@@ -22,6 +22,7 @@ workengine-application = { path = "crates/application", version = "0.0.0" }
 workengine-adapters-store = { path = "crates/adapters-store", version = "0.0.0" }
 workengine-adapters-worker = { path = "crates/adapters-worker", version = "0.0.0" }
 workengine-adapters-workspace = { path = "crates/adapters-workspace", version = "0.0.0" }
+clap = { version = "4.6.6", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

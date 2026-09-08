@@ -19,14 +19,13 @@ If domain code branches on an agent or tracker product name, the layer is wrong.
 
 ## CLI
 
-The binary name is `workengine`. The first runtime slice will expose:
+The binary name is `workengine`. `workengine --help` and `workengine version` exist. The first runtime slice will add:
 
 ```
 workengine next
 workengine start --work <id>
 workengine complete --file outcome.json
 workengine park --work <id>
-workengine version
 ```
 
 The CLI does not ask a model which Work or which next status to take.
