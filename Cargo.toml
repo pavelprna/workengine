@@ -22,8 +22,9 @@ workengine-application = { path = "crates/application", version = "0.0.0" }
 workengine-adapters-store = { path = "crates/adapters-store", version = "0.0.0" }
 workengine-adapters-worker = { path = "crates/adapters-worker", version = "0.0.0" }
 workengine-adapters-workspace = { path = "crates/adapters-workspace", version = "0.0.0" }
-clap = { version = "4.6.6", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
+clap = { version = "4.6.6", default-features = false, features = ["std", "derive", "help", "usage", "error-context", "env"] }
 thiserror = "2.0.20"
+anyhow = "1.0.104"
 uuid = { version = "1.26.0", features = ["v4"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"

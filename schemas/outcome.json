@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://workengine.dev/schemas/outcome/v1.json",
+  "title": "Workengine Worker outcome",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "kind", "workerProfile"],
+  "properties": {
+    "schemaVersion": { "type": "integer", "const": 1 },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "succeeded",
+        "failed",
+        "timed_out",
+        "budget_exceeded",
+        "channel_error"
+      ]
+    },
+    "workerProfile": { "type": "string", "minLength": 1 }
+  }
+}

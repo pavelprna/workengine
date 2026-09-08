@@ -19,18 +19,21 @@ If domain code branches on an agent or tracker product name, the layer is wrong.
 
 ## CLI
 
-The binary name is `workengine`. `workengine --help` and `workengine version` exist. The first runtime slice will add:
+The binary name is `workengine`. `workengine --help` and `workengine version` exist. The first runtime slice:
 
 ```
+workengine create --goal "<text>" [--profile stub]
 workengine next
 workengine start --work <id>
-workengine complete --file outcome.json
+workengine complete --work <id> --file outcome.json
 workengine park --work <id>
 ```
 
-The CLI does not ask a model which Work or which next status to take.
+`--data-dir` (or `WORKENGINE_DATA_DIR`) selects the SQLite store and workspace directories. Default: `.workengine`.
 
-Crate layers exist (`workengine-domain` through `workengine-cli`). Domain types and use cases are not in this slice. Run `just check` as in [CONTRIBUTING.md](CONTRIBUTING.md).
+`start` is the happy path: bind a workspace, spawn the stub Worker, wait, and apply `complete`. `complete --file` is recovery. The CLI does not ask a model which Work or which next status to take.
+
+Crate layers: `workengine-domain` through `workengine-cli`. Run `just check` as in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## What this is not
 

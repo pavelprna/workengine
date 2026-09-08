@@ -39,14 +39,14 @@ Enforced by the Cargo workspace as soon as crates exist. Clippy and `cargo deny`
 | --- | --- | --- | --- |
 | F13 | Timeout kills the process group, not only the parent | worker adapter test | enforced |
 | F14 | Two Work ids never share a workspace root | workspace test | enforced |
-| F15 | Kill/restart mid-`complete` resumes; second `complete` is idempotent | durable-execution test on stub Worker | [UNTESTED] |
+| F15 | Kill/restart mid-`complete` resumes; second `complete` is idempotent | durable-execution test on stub Worker | enforced |
 
 ## Product contracts
 
 | ID | Invariant | Check | Status |
 | --- | --- | --- | --- |
-| F16 | Long-lived artifacts carry `schemaVersion` | schema tests | [UNTESTED] |
-| F17 | Exit codes are a published table, not a single non-zero | CLI tests | [UNTESTED] |
+| F16 | Long-lived artifacts carry `schemaVersion` | schema tests | enforced |
+| F17 | Exit codes are a published table, not a single non-zero | CLI tests | enforced |
 
 ## Process and hygiene
 

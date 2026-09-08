@@ -1,4 +1,18 @@
+use std::path::PathBuf;
+use std::process::ExitCode;
+use std::time::Duration;
+
+use anyhow::Context;
 use clap::{Parser, Subcommand};
+use workengine_adapters_store::SqliteStore;
+use workengine_adapters_worker::{StubBehavior, StubWorkerRunner, decode_outcome};
+use workengine_adapters_workspace::DirWorkspaceFactory;
+use workengine_application::{
+    AppError, SystemClock, WorkStore, complete, create, next, park, recover_unconfirmed, start,
+};
+use workengine_domain::{DomainError, OutcomeKind, WorkId, WorkStatus};
+
+const DEFAULT_BUDGET: Duration = Duration::from_secs(60);
 
 /// Control plane for coding agents.
 #[derive(Parser)]
@@ -9,6 +23,9 @@ use clap::{Parser, Subcommand};
 )]
 #[command(arg_required_else_help = true)]
 struct Cli {
+    /// Directory for the SQLite store and workspaces
+    #[arg(long, env = "WORKENGINE_DATA_DIR")]
+    data_dir: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
@@ -17,12 +34,132 @@ struct Cli {
 enum Command {
     /// Print the Workengine version
     Version,
+    /// Persist a new Work as ready
+    Create {
+        /// What this Work is for
+        #[arg(long)]
+        goal: String,
+        /// Worker profile name (opaque configuration key)
+        #[arg(long, default_value = "stub")]
+        profile: String,
+    },
+    /// Print the next startable Work id
+    Next,
+    /// Bind a workspace, run a Worker, and complete
+    Start {
+        #[arg(long)]
+        work: String,
+    },
+    /// Apply an outcome file to leftover running Work
+    Complete {
+        #[arg(long)]
+        work: String,
+        #[arg(long)]
+        file: PathBuf,
+    },
+    /// Park leftover running Work
+    Park {
+        #[arg(long)]
+        work: String,
+    },
 }
 
-fn main() {
-    match Cli::parse().command {
-        Command::Version => {
-            println!("workengine {}", env!("CARGO_PKG_VERSION"));
+fn main() -> ExitCode {
+    match run() {
+        Ok(code) => ExitCode::from(code),
+        Err(err) => {
+            eprintln!("{err:#}");
+            ExitCode::from(exit_status(&err))
         }
     }
+}
+
+fn run() -> anyhow::Result<u8> {
+    let cli = Cli::parse();
+    let data_dir = cli
+        .data_dir
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(".workengine"));
+    match cli.command {
+        Command::Version => {
+            println!("workengine {}", env!("CARGO_PKG_VERSION"));
+            Ok(0)
+        }
+        Command::Create { goal, profile } => {
+            let mut store = open_store(&data_dir, true)?;
+            let work = create(&mut store, &SystemClock, goal, profile)?;
+            println!("{} {}", work.id(), work.status());
+            Ok(0)
+        }
+        Command::Next => {
+            let store = open_store(&data_dir, true)?;
+            if let Some(id) = next(&store)? {
+                println!("{id}");
+            }
+            Ok(0)
+        }
+        Command::Start { work } => {
+            let mut store = open_store(&data_dir, true)?;
+            let workspaces = DirWorkspaceFactory::new(&data_dir);
+            let runner = StubWorkerRunner::new(StubBehavior::Succeed);
+            let id = WorkId::parse(work)?;
+            let work = start(&mut store, &workspaces, &runner, &id, DEFAULT_BUDGET)?;
+            println!("{} {}", work.id(), work.status());
+            Ok(exit_for_status(work.status(), outcome_kind(&store, &id)?))
+        }
+        Command::Complete { work, file } => {
+            let mut store = open_store(&data_dir, false)?;
+            let workspaces = DirWorkspaceFactory::new(&data_dir);
+            let bytes = std::fs::read(&file).with_context(|| format!("read {}", file.display()))?;
+            let outcome = decode_outcome(&bytes).map_err(anyhow::Error::from)?;
+            let id = WorkId::parse(work)?;
+            let done = complete(&mut store, &workspaces, &id, &outcome)?;
+            println!("{} {}", done.id(), done.status());
+            Ok(exit_for_status(done.status(), Some(outcome.kind())))
+        }
+        Command::Park { work } => {
+            let mut store = open_store(&data_dir, true)?;
+            let id = WorkId::parse(work)?;
+            let parked = park(&mut store, &id)?;
+            println!("{} {}", parked.id(), parked.status());
+            Ok(0)
+        }
+    }
+}
+
+fn open_store(data_dir: &std::path::Path, recover: bool) -> anyhow::Result<SqliteStore> {
+    let mut store = SqliteStore::open(data_dir)?;
+    if recover {
+        recover_unconfirmed(&mut store)?;
+    }
+    Ok(store)
+}
+
+fn outcome_kind(store: &SqliteStore, id: &WorkId) -> Result<Option<OutcomeKind>, AppError> {
+    Ok(store.events(id)?.last().and_then(|e| e.outcome_kind()))
+}
+
+fn exit_for_status(status: WorkStatus, kind: Option<OutcomeKind>) -> u8 {
+    match (status, kind) {
+        (WorkStatus::Succeeded, _) => 0,
+        (_, Some(OutcomeKind::BudgetExceeded)) => 20,
+        (_, Some(OutcomeKind::TimedOut)) => 21,
+        (WorkStatus::Failed, _) => 1,
+        _ => 0,
+    }
+}
+
+fn exit_status(err: &anyhow::Error) -> u8 {
+    if let Some(app) = err.downcast_ref::<AppError>() {
+        return match app {
+            AppError::Domain(DomainError::IllegalTransition { .. })
+            | AppError::Domain(DomainError::TerminalConflict(_)) => 10,
+            AppError::Conflict(_) | AppError::Store(_) => 11,
+            AppError::OutcomeSchema(_) => 30,
+            AppError::Workspace(_) => 40,
+            AppError::NotFound(_) => 2,
+            AppError::Domain(_) | AppError::Worker(_) => 1,
+        };
+    }
+    2
 }

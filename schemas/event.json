@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://workengine.dev/schemas/event/v1.json",
+  "title": "Workengine store event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "workId",
+    "kind",
+    "to",
+    "createdAtUnixMs"
+  ],
+  "properties": {
+    "schemaVersion": { "type": "integer", "const": 1 },
+    "workId": { "type": "string", "minLength": 1 },
+    "kind": {
+      "type": "string",
+      "enum": ["created", "started", "completed", "parked"]
+    },
+    "from": { "type": ["string", "null"] },
+    "to": { "type": "string" },
+    "goal": { "type": ["string", "null"] },
+    "workerProfile": { "type": ["string", "null"] },
+    "outcomeKind": { "type": ["string", "null"] },
+    "workspaceRoot": { "type": ["string", "null"] },
+    "createdAtUnixMs": { "type": "integer", "minimum": 0 }
+  }
+}

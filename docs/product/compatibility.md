@@ -1,6 +1,6 @@
 # Compatibility charter
 
-Draft. Exit codes and schemas become binding when `complete` exists. Until then this file is the intended contract, not a promise of a released binary.
+Exit codes and schemas are binding for this runtime slice. A breaking change is a major version.
 
 Workengine versions with SemVer. A tag `vX.Y.Z` is a product decision, not an automatic side effect of a commit.
 
@@ -46,7 +46,7 @@ Changing these is not a SemVer break.
 | 30 | Outcome schema error |
 | 40 | Workspace error |
 
-Exact numbers freeze when the CLI first ships `complete`. Do not treat "non-zero" as a single failure class.
+Exact numbers freeze with this slice. Do not treat "non-zero" as a single failure class.
 
 ## Schema evolution
 

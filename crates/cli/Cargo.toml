@@ -12,11 +12,16 @@ name = "workengine"
 path = "src/main.rs"
 
 [dependencies]
+workengine-domain.workspace = true
 workengine-application.workspace = true
 workengine-adapters-store.workspace = true
 workengine-adapters-worker.workspace = true
 workengine-adapters-workspace.workspace = true
 clap.workspace = true
+anyhow.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true
