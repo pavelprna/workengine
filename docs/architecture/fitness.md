@@ -12,9 +12,9 @@ Enforced by the Cargo workspace as soon as crates exist. Clippy and `cargo deny`
 | --- | --- | --- | --- |
 | F1 | `workengine-domain` does not depend on application, adapters, or cli | Cargo.toml graph / `cargo check --workspace` | enforced |
 | F2 | `workengine-application` does not depend on adapters or cli | Cargo.toml graph | enforced |
-| F3 | `workengine-domain` does not use filesystem, process, or network APIs | `crates/domain/clippy.toml` / clippy `disallowed_methods` / `disallowed_types` | enforced |
+| F3 | `workengine-domain` does not use filesystem, process, network, environment, or thread APIs | `crates/domain/clippy.toml` / clippy `disallowed_methods` / `disallowed_types` | enforced |
 | F4 | `workengine-domain` contains no product or tracker names | `crates/cli/tests/no_product_names.rs` | enforced |
-| F5 | `workengine-application` does not spawn processes or open sockets | `crates/application/clippy.toml` / clippy + crate graph | enforced |
+| F5 | `workengine-application` does not spawn processes, open sockets, or touch the filesystem | `crates/application/clippy.toml` / clippy + crate graph | enforced |
 
 ## Domain behaviour
 

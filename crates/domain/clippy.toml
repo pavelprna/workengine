@@ -14,6 +14,7 @@ disallowed-types = [
   { path = "std::net::UdpSocket", reason = "domain has no network I/O" },
   { path = "std::os::unix::net::UnixStream", reason = "domain has no network I/O" },
   { path = "std::os::unix::net::UnixListener", reason = "domain has no network I/O" },
+  { path = "std::thread::JoinHandle", reason = "domain does not spawn threads" },
 ]
 
 disallowed-methods = [
@@ -44,4 +45,8 @@ disallowed-methods = [
   { path = "std::net::TcpStream::connect", reason = "domain has no network I/O" },
   { path = "std::net::TcpListener::bind", reason = "domain has no network I/O" },
   { path = "std::net::UdpSocket::bind", reason = "domain has no network I/O" },
+  { path = "std::env::var", reason = "domain has no environment I/O" },
+  { path = "std::env::var_os", reason = "domain has no environment I/O" },
+  { path = "std::env::set_var", reason = "domain has no environment I/O" },
+  { path = "std::thread::spawn", reason = "domain does not spawn threads" },
 ]

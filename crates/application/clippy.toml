@@ -10,6 +10,8 @@ disallowed-types = [
   { path = "std::net::UdpSocket", reason = "application does not open sockets" },
   { path = "std::os::unix::net::UnixStream", reason = "application does not open sockets" },
   { path = "std::os::unix::net::UnixListener", reason = "application does not open sockets" },
+  { path = "std::fs::File", reason = "application does not touch the filesystem" },
+  { path = "std::fs::OpenOptions", reason = "application does not touch the filesystem" },
 ]
 
 disallowed-methods = [
@@ -19,4 +21,12 @@ disallowed-methods = [
   { path = "std::net::TcpStream::connect", reason = "application does not open sockets" },
   { path = "std::net::TcpListener::bind", reason = "application does not open sockets" },
   { path = "std::net::UdpSocket::bind", reason = "application does not open sockets" },
+  { path = "std::fs::read", reason = "application does not touch the filesystem" },
+  { path = "std::fs::read_to_string", reason = "application does not touch the filesystem" },
+  { path = "std::fs::write", reason = "application does not touch the filesystem" },
+  { path = "std::fs::create_dir", reason = "application does not touch the filesystem" },
+  { path = "std::fs::create_dir_all", reason = "application does not touch the filesystem" },
+  { path = "std::fs::OpenOptions::new", reason = "application does not touch the filesystem" },
+  { path = "std::fs::File::open", reason = "application does not touch the filesystem" },
+  { path = "std::fs::File::create", reason = "application does not touch the filesystem" },
 ]
