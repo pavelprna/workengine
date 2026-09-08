@@ -86,6 +86,7 @@ fn main() -> ExitCode {
 }
 
 fn run() -> anyhow::Result<u8> {
+    init_tracing();
     let cli = Cli::parse();
     let data_dir = cli
         .data_dir
@@ -93,7 +94,7 @@ fn run() -> anyhow::Result<u8> {
         .unwrap_or_else(|| PathBuf::from(".workengine"));
     match cli.command {
         Command::Version => {
-            println!("workengine {}", env!("CARGO_PKG_VERSION"));
+            println!("{}", version_line());
             Ok(0)
         }
         Command::Create { goal, profile } => {
@@ -143,6 +144,25 @@ fn run() -> anyhow::Result<u8> {
             println!("{} {}", parked.id(), parked.status());
             Ok(0)
         }
+    }
+}
+
+fn init_tracing() {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .try_init();
+}
+
+fn version_line() -> String {
+    let ver = env!("CARGO_PKG_VERSION");
+    let sha = env!("WORKENGINE_GIT_SHA");
+    if sha.is_empty() {
+        format!("workengine {ver}")
+    } else {
+        format!("workengine {ver} ({sha})")
     }
 }
 

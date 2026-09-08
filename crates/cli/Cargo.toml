@@ -19,10 +19,13 @@ workengine-adapters-worker.workspace = true
 workengine-adapters-workspace.workspace = true
 clap.workspace = true
 anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
 rusqlite.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

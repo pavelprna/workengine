@@ -9,6 +9,13 @@ fn stdout(output: &std::process::Output) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }
 
+fn stream_records(stderr: &[u8]) -> Vec<serde_json::Value> {
+    String::from_utf8_lossy(stderr)
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect()
+}
+
 fn mark_leftover_running(data_dir: &Path, id: &str) {
     let conn = rusqlite::Connection::open(data_dir.join("workengine.sqlite")).unwrap();
     conn.execute("UPDATE works SET status = 'running' WHERE id = ?1", [id])
@@ -49,7 +56,17 @@ fn create_work(data_dir: &Path) -> String {
 fn version_prints_package_version() {
     let output = bin().arg("version").output().unwrap();
     assert!(output.status.success());
-    assert_eq!(stdout(&output), "workengine 0.0.0");
+    let line = stdout(&output);
+    assert!(line.starts_with("workengine 0.0.0"), "version line: {line}");
+    if let Some(rest) = line.strip_prefix("workengine 0.0.0")
+        && !rest.is_empty()
+    {
+        assert!(
+            rest.starts_with(" (") && rest.ends_with(')'),
+            "version line: {line}"
+        );
+        assert!(rest.len() > 3, "version line: {line}");
+    }
 }
 
 #[test]
@@ -268,4 +285,47 @@ fn exceed_budget_exits_budget_exceeded() {
         String::from_utf8_lossy(&start.stderr)
     );
     assert!(stdout(&start).ends_with(" failed"));
+}
+
+#[test]
+fn start_emits_stream_records_with_work_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let id = create_work(dir.path());
+    let start = bin()
+        .args([
+            "--data-dir",
+            dir.path().to_str().unwrap(),
+            "start",
+            "--work",
+            &id,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        start.status.success(),
+        "start failed: {}",
+        String::from_utf8_lossy(&start.stderr)
+    );
+    assert!(stdout(&start).ends_with(" succeeded"));
+    let records = stream_records(&start.stderr);
+    assert!(
+        !records.is_empty(),
+        "expected JSON stream on stderr, got: {}",
+        String::from_utf8_lossy(&start.stderr)
+    );
+    for rec in &records {
+        assert_eq!(rec["schema_version"], 1, "{rec}");
+        let work_id = rec["work_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("missing work_id: {rec}"));
+        assert_eq!(work_id, id, "{rec}");
+        assert!(
+            rec["event"].as_str().is_some_and(|e| !e.is_empty()),
+            "{rec}"
+        );
+    }
+    let events: Vec<&str> = records.iter().filter_map(|r| r["event"].as_str()).collect();
+    assert!(events.contains(&"spawned"), "{events:?}");
+    assert!(events.contains(&"exited"), "{events:?}");
+    assert!(events.contains(&"child_stdout"), "{events:?}");
 }
