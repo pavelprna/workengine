@@ -70,10 +70,13 @@ Behaviour: [workflow.md](../spec/workflow.md) Publication (best-effort; the Work
 
 One use case per module, named after the CLI verb:
 
+- `create`
 - `next`
 - `start`
 - `complete`
 - `park`
+
+`start` binds a workspace, spawns through `WorkerRunner`, waits, and applies `complete`. CLI `complete --file` is the recovery path, not a second happy path.
 
 Later: `capture`. Not a god-object orchestrator.
 

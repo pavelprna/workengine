@@ -13,6 +13,7 @@ This document is the canonical behaviour of Work. Keywords follow [RFC 2119](htt
 ## Source
 
 - **[UNTESTED]** Work MAY originate from an external source through an inbound adapter, or from the local CLI.
+- **[UNTESTED]** Until an inbound adapter exists, the CLI `create` verb MUST be the way an operator introduces Work. `create` MUST persist the Work as `ready` and MUST NOT spawn a Worker.
 - **[UNTESTED]** The domain MUST NOT name, import, or branch on a concrete inbound product.
 - **[UNTESTED]** A record in an external source MUST NOT become Work until an explicit signal exists: a ready state of that record, or an explicit operator command.
 
@@ -38,7 +39,9 @@ The first runtime slice statuses are this closed set. They are lifecycle names, 
 ## Attributes
 
 - **[UNTESTED]** A Work MUST carry a set of attributes that describe its content (what to do, which workspace root, which Worker profile).
+- **[UNTESTED]** The first-slice attributes MUST be a goal string and a Worker profile name. The profile name is an opaque configuration key, not a vendor branch in the domain.
 - **[UNTESTED]** Attribute names that identify a vendor or tracker product MUST NOT appear in the domain model.
+- **[UNTESTED]** The first slice MUST NOT require a Work relation graph. Relations remain allowed later; they are not needed to run `create` / `next` / `start`.
 
 ## Relations
 

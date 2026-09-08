@@ -12,7 +12,7 @@ These are public contracts. A breaking change is a major version, plus a migrati
 
 | Surface | Compatibility |
 | --- | --- |
-| CLI command names (`next`, `start`, `complete`, `park`, `version`) | Stable |
+| CLI command names (`create`, `next`, `start`, `complete`, `park`, `version`) | Stable |
 | CLI flags and env vars documented in `--help` | Stable |
 | Process exit codes | Stable; see table below |
 | Outcome JSON schema (`schemaVersion`) | Stable within a major; unknown fields must fail closed or be reserved |
@@ -37,6 +37,7 @@ Changing these is not a SemVer break.
 | Code | Meaning |
 | --- | --- |
 | 0 | Success |
+| 1 | Work completed with a failed outcome |
 | 2 | Usage / invocation error |
 | 10 | Illegal transition |
 | 11 | Store conflict / capture lost |

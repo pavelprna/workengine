@@ -26,13 +26,19 @@ First-slice transitions. Status names are defined in [work.md](work.md). Workeng
 
 ## Operations
 
-The first CLI slice exposes `next`, `start`, `complete`, and `park`. Their rules:
+The first CLI slice exposes `create`, `next`, `start`, `complete`, and `park`. Their rules:
 
+- **[UNTESTED]** `create` MUST persist a new Work as `ready` with a `Created` event, atomically, and MUST NOT spawn a Worker.
 - **[UNTESTED]** `next` MUST select Work according to the store and the FSM, not by asking a model which item or phase to take.
+- **[UNTESTED]** First-slice `next` MUST return the oldest `ready` Work, else the oldest `parked` Work. It MUST NOT select `running`, `succeeded`, or `failed`. It MUST NOT spawn a Worker.
 - **[UNTESTED]** `start` MUST bind a Workspace and spawn a Worker only when the Work is `ready` or `parked` and the FSM allows it. The Work then becomes `running`.
+- **[UNTESTED]** After the Worker process exits, `start` MUST apply `complete` from the closed outcome. The CLI happy path is one `start` invocation: spawn, wait, record.
 - **[UNTESTED]** `complete` MUST apply a closed outcome and persist status plus event atomically, following the table above.
+- **[UNTESTED]** `complete` as a CLI verb (`complete --file`) MUST exist for recovery: Work still `running`, outcome artifact already written, control plane restarting before the status was committed.
+- **[UNTESTED]** If a workspace already contains a confirmed-looking outcome artifact after a leftover `running` Work was parked, `start` MUST apply `complete` from that artifact and MUST NOT spawn a second Worker.
 - **[UNTESTED]** Repeating `next`, `start`, `complete`, or `park` on the same Work MUST NOT duplicate effects: no second spawn, no second status transition, no second event.
 - **[UNTESTED]** `park` MUST pause without losing progress: reach a save point, leave the Worker slot, and leave the Work `parked`.
+- **[UNTESTED]** First-slice CLI is a single writer and is not a daemon. `park` MUST NOT require a second Workengine process signalling a Worker that `start` is still waiting on. Concurrent pause of an in-flight wait is not this slice.
 - **[UNTESTED]** `park` MUST NOT be abort. Abort, timeout, and hang MUST terminate the process group without treating that path as a save-point pause. `park` MUST reach a save point; abort MUST NOT be required to.
 - **[UNTESTED]** Parked Work MUST NOT spin, poll, or occupy a Worker slot.
 - **[UNTESTED]** An answer to a park MUST continue the same Work. It MUST NOT create a new Work.
@@ -48,6 +54,8 @@ The first CLI slice exposes `next`, `start`, `complete`, and `park`. Their rules
 - **[UNTESTED]** Between Worker runs, status MUST travel through persistent artifacts, not by continuing a model dialogue.
 - **[UNTESTED]** Every long-lived artifact MUST carry `schemaVersion`.
 - **[UNTESTED]** On Workengine restart, Work in an unconfirmed state MUST return to the queue automatically (resume from the failure point, not from the beginning of the Work).
+- **[UNTESTED]** First-slice unconfirmed state is Work whose status is `running` and that has no committed `Completed` event. The next CLI invocation other than `complete` MUST `park` that Work. The workspace directory is the save point. There is no `running` → `ready` transition.
+- **[UNTESTED]** `complete --file` MUST apply to leftover `running` Work and MUST NOT park it first.
 
 ## Publication and observation
 

@@ -14,6 +14,7 @@ This document is the canonical behaviour of Workspace. Keywords follow [RFC 2119
 
 - **[UNTESTED]** A Worker MUST NOT be able to access paths outside the workspace root that Workengine assigned.
 - **[UNTESTED]** The first runtime slice MAY implement containment as a dedicated directory. Later adapters MAY use git worktrees or containers behind the same `WorkspaceFactory` port.
+- **[UNTESTED]** The first-slice dedicated directory MUST be uniquely derived from `WorkId`. It MAY start empty; copying an operator checkout is not required of this slice.
 - **[UNTESTED]** Workengine's own operations on a codebase MUST be isolated from user-supplied environment settings that a Worker could change.
 
 ## Lifecycle

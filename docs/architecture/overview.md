@@ -16,7 +16,7 @@ Workengine is a hexagonal control plane. Layers are Cargo crates. A forbidden de
                    v
 +------------------------------------------------------+
 |  application                                          |
-|  next / start / complete / park                     |
+|  create / next / start / complete / park             |
 |  ports = traits                                       |
 +------------------+-------------------+---------------+
                    |                   |
@@ -31,7 +31,7 @@ Workengine is a hexagonal control plane. Layers are Cargo crates. A forbidden de
          +----------------------------------------+
 ```
 
-Inbound and Publisher are ports. They are not part of the first vertical slice. Until they exist, Work is created by the CLI.
+Inbound and Publisher are ports. They are not part of the first vertical slice. Until they exist, Work is created by the CLI `create` verb.
 
 ## Crates
 
