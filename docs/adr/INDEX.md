@@ -10,3 +10,5 @@
 Status values: Proposed, Accepted, Superseded, Deprecated.
 
 Read this index before changing layers, store, or runner. Then read the relevant ADR. An `Accepted` decision is an invariant until a new ADR supersedes it.
+
+Commit, branch, and license policy live in [../../CONTRIBUTING.md](../../CONTRIBUTING.md), not here.
