@@ -14,9 +14,16 @@ pub trait WorkStore {
     fn put(&mut self, work: &Work, event: WorkEvent) -> Result<(), AppError>;
 }
 
+/// How to bind the isolated directory for one Work.
+pub struct BindRequest<'a> {
+    pub work_id: &'a WorkId,
+    pub goal: &'a str,
+    pub checkout: Option<&'a Path>,
+}
+
 /// Isolated directory for the life of one Work.
 pub trait WorkspaceFactory {
-    fn bind(&self, work_id: &WorkId) -> Result<PathBuf, AppError>;
+    fn bind(&self, request: &BindRequest<'_>) -> Result<PathBuf, AppError>;
     fn read_artifact(&self, work_id: &WorkId) -> Result<Option<Vec<u8>>, AppError>;
     fn record_memory(
         &self,
@@ -36,4 +43,13 @@ pub struct RunRequest<'a> {
     pub work: &'a Work,
     pub workspace_root: &'a Path,
     pub budget: Duration,
+}
+
+/// Inputs for `start` that are not ports.
+pub struct StartRequest<'a> {
+    pub id: &'a WorkId,
+    pub budget: Duration,
+    /// Extra spawns after a retry-classified channel error. Snapshotted for this call.
+    pub retry_limit: u32,
+    pub checkout: Option<&'a Path>,
 }

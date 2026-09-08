@@ -1,14 +1,14 @@
-use std::time::Duration;
-
 use workengine_domain::{
-    OUTCOME_SCHEMA_VERSION, Outcome, OutcomeKind, Work, WorkEvent, WorkId, WorkStatus,
+    OUTCOME_SCHEMA_VERSION, Outcome, OutcomeKind, Work, WorkEvent, WorkStatus,
 };
 
 use crate::clock::Clock;
 use crate::complete::complete;
-use crate::error::AppError;
+use crate::error::{AppError, ChannelReaction};
 use crate::park::park;
-use crate::ports::{RunRequest, WorkStore, WorkerRunner, WorkspaceFactory};
+use crate::ports::{
+    BindRequest, RunRequest, StartRequest, WorkStore, WorkerRunner, WorkspaceFactory,
+};
 
 /// Bind a workspace, spawn unless an outcome artifact already exists, then complete.
 pub fn start(
@@ -16,9 +16,9 @@ pub fn start(
     workspaces: &impl WorkspaceFactory,
     runner: &impl WorkerRunner,
     clock: &impl Clock,
-    id: &WorkId,
-    budget: Duration,
+    request: &StartRequest<'_>,
 ) -> Result<Work, AppError> {
+    let id = request.id;
     let mut work = store
         .get(id)?
         .ok_or_else(|| AppError::NotFound(id.clone()))?;
@@ -30,7 +30,11 @@ pub fn start(
         return complete(store, workspaces, clock, id, &outcome);
     }
 
-    let root = workspaces.bind(id)?;
+    let root = workspaces.bind(&BindRequest {
+        work_id: id,
+        goal: work.attributes().goal(),
+        checkout: request.checkout,
+    })?;
     work.bind_workspace(root.to_string_lossy().into_owned())?;
     if work.status() == WorkStatus::Running && artifact.is_none() {
         park(store, clock, id)?;
@@ -57,26 +61,33 @@ pub fn start(
     }
 
     let profile = work.attributes().worker_profile().to_owned();
-    let outcome = match runner.run(&RunRequest {
-        work: &work,
-        workspace_root: &root,
-        budget,
-    }) {
-        Ok(outcome) => outcome,
-        Err(err @ AppError::OutcomeSchema(_)) => return Err(err),
-        Err(_) => {
-            return persist_channel(store, workspaces, clock, id, &profile);
+    let mut remaining = request.retry_limit;
+    loop {
+        match runner.run(&RunRequest {
+            work: &work,
+            workspace_root: &root,
+            budget: request.budget,
+        }) {
+            Ok(outcome) => return complete(store, workspaces, clock, id, &outcome),
+            Err(err @ AppError::OutcomeSchema(_)) => return Err(err),
+            Err(AppError::Channel(ChannelReaction::Park)) => {
+                return park(store, clock, id);
+            }
+            Err(AppError::Channel(ChannelReaction::Retry)) if remaining > 0 => {
+                remaining -= 1;
+            }
+            Err(AppError::Channel(ChannelReaction::Retry | ChannelReaction::Fail)) | Err(_) => {
+                return persist_channel(store, workspaces, clock, id, &profile);
+            }
         }
-    };
-
-    complete(store, workspaces, clock, id, &outcome)
+    }
 }
 
 fn persist_channel(
     store: &mut impl WorkStore,
     workspaces: &impl WorkspaceFactory,
     clock: &impl Clock,
-    id: &WorkId,
+    id: &workengine_domain::WorkId,
     profile: &str,
 ) -> Result<Work, AppError> {
     let outcome = Outcome::new(OUTCOME_SCHEMA_VERSION, OutcomeKind::ChannelError, profile)?;

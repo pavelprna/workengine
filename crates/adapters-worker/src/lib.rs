@@ -1,24 +1,22 @@
 //! Stub Worker: a real process that writes a schema-valid outcome.
 
 use std::fs;
-use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::str::FromStr;
-use std::thread;
-use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use workengine_application::{AppError, RunRequest, WorkerRunner};
+use workengine_application::{AppError, ChannelReaction, RunRequest, WorkerRunner};
 use workengine_domain::{OUTCOME_SCHEMA_VERSION, Outcome, OutcomeKind};
 
 mod stream;
+mod supervise;
 
-use stream::emit;
 pub use stream::{
     EVENT_CHILD_STDERR, EVENT_CHILD_STDOUT, EVENT_EXITED, EVENT_KILLED, EVENT_SPAWNED,
     STREAM_EVENTS, STREAM_SCHEMA_VERSION, record_line,
 };
+use supervise::{ChildWait, spawn_supervised};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StubBehavior {
@@ -26,6 +24,9 @@ pub enum StubBehavior {
     Fail,
     Hang,
     ExceedBudget,
+    ChannelFail,
+    ChannelPark,
+    ChannelRetry,
 }
 
 impl FromStr for StubBehavior {
@@ -37,6 +38,9 @@ impl FromStr for StubBehavior {
             "fail" => Ok(Self::Fail),
             "hang" => Ok(Self::Hang),
             "exceed_budget" => Ok(Self::ExceedBudget),
+            "channel_fail" => Ok(Self::ChannelFail),
+            "channel_park" => Ok(Self::ChannelPark),
+            "channel_retry" => Ok(Self::ChannelRetry),
             other => Err(format!("unknown stub behavior {other}")),
         }
     }
@@ -71,6 +75,9 @@ impl WorkerRunner for StubWorkerRunner {
             StubBehavior::Succeed => run_writer(request, OutcomeKind::Succeeded, profile),
             StubBehavior::Fail => run_writer(request, OutcomeKind::Failed, profile),
             StubBehavior::ExceedBudget => run_budget(request, profile),
+            StubBehavior::ChannelFail => Err(AppError::Channel(ChannelReaction::Fail)),
+            StubBehavior::ChannelPark => Err(AppError::Channel(ChannelReaction::Park)),
+            StubBehavior::ChannelRetry => Err(AppError::Channel(ChannelReaction::Retry)),
         }
     }
 
@@ -118,32 +125,14 @@ fn run_writer(
         .arg("cp .outcome-payload.json outcome.json && printf '%s\\n' stub")
         .current_dir(request.workspace_root);
     match spawn_supervised(cmd, request.work.id().as_str(), request.budget)? {
-        ChildWait::Exited => decode_outcome(&fs::read(&dest).map_err(AppError::worker)?),
+        ChildWait::Exited { success: true } => {
+            decode_outcome(&fs::read(&dest).map_err(AppError::worker)?)
+        }
+        ChildWait::Exited { success: false } => {
+            Err(AppError::worker("stub worker exited unsuccessfully"))
+        }
         ChildWait::BudgetExceeded => {
             persist_outcome(request.workspace_root, OutcomeKind::BudgetExceeded, profile)
-        }
-    }
-}
-
-enum ChildWait {
-    Exited,
-    BudgetExceeded,
-}
-
-fn wait_child(child: &mut std::process::Child, budget: Duration) -> Result<ChildWait, AppError> {
-    let deadline = Instant::now() + budget;
-    loop {
-        match child.try_wait().map_err(AppError::worker)? {
-            Some(status) if status.success() => return Ok(ChildWait::Exited),
-            Some(status) => {
-                return Err(AppError::worker(format!("stub worker exited {status}")));
-            }
-            None if Instant::now() >= deadline => {
-                kill_group(child.id());
-                let _ = child.wait();
-                return Ok(ChildWait::BudgetExceeded);
-            }
-            None => thread::sleep(Duration::from_millis(5)),
         }
     }
 }
@@ -165,7 +154,7 @@ fn run_budget(request: &RunRequest<'_>, profile: &str) -> Result<Outcome, AppErr
         ChildWait::BudgetExceeded => {
             persist_outcome(request.workspace_root, OutcomeKind::BudgetExceeded, profile)
         }
-        ChildWait::Exited => Err(AppError::worker("budget stub exited before budget")),
+        ChildWait::Exited { .. } => Err(AppError::worker("budget stub exited before budget")),
     }
 }
 
@@ -179,75 +168,7 @@ fn run_hang(request: &RunRequest<'_>, profile: &str) -> Result<Outcome, AppError
         ChildWait::BudgetExceeded => {
             persist_outcome(request.workspace_root, OutcomeKind::TimedOut, profile)
         }
-        ChildWait::Exited => Err(AppError::worker("hang stub exited before budget")),
-    }
-}
-
-fn spawn_supervised(
-    mut cmd: Command,
-    work_id: &str,
-    budget: Duration,
-) -> Result<ChildWait, AppError> {
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
-    apply_process_group(&mut cmd);
-    let mut child = cmd.spawn().map_err(AppError::worker)?;
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-    let out_h = drain_pipe(stdout, work_id.to_owned(), EVENT_CHILD_STDOUT);
-    let err_h = drain_pipe(stderr, work_id.to_owned(), EVENT_CHILD_STDERR);
-    emit(work_id, EVENT_SPAWNED, None);
-    let result = wait_child(&mut child, budget);
-    match &result {
-        Ok(ChildWait::BudgetExceeded) => emit(work_id, EVENT_KILLED, None),
-        Ok(ChildWait::Exited) => emit(work_id, EVENT_EXITED, None),
-        Err(_) => {}
-    }
-    let _ = out_h.join();
-    let _ = err_h.join();
-    result
-}
-
-fn drain_pipe<R: Read + Send + 'static>(
-    pipe: Option<R>,
-    work_id: String,
-    event: &'static str,
-) -> thread::JoinHandle<()> {
-    thread::spawn(move || {
-        let Some(pipe) = pipe else {
-            return;
-        };
-        for line in BufReader::new(pipe).lines() {
-            match line {
-                Ok(line) => emit(&work_id, event, Some(&line)),
-                Err(_) => break,
-            }
-        }
-    })
-}
-
-fn apply_process_group(cmd: &mut Command) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
-}
-
-fn kill_group(pid: u32) {
-    #[cfg(unix)]
-    {
-        use nix::sys::signal::{self, Signal};
-        use nix::unistd::Pid;
-        let pid = Pid::from_raw(pid as i32);
-        let _ = signal::killpg(pid, Signal::SIGTERM);
-        thread::sleep(Duration::from_millis(50));
-        let _ = signal::killpg(pid, Signal::SIGKILL);
-    }
-    #[cfg(not(unix))]
-    {
-        // First-slice process-group teardown is Unix. See docs/product/threat-model.md.
-        let _ = pid;
+        ChildWait::Exited { .. } => Err(AppError::worker("hang stub exited before budget")),
     }
 }
 
@@ -296,6 +217,7 @@ mod tests {
     fn timeout_kills_the_process_group() {
         use nix::sys::signal::kill;
         use nix::unistd::Pid;
+        use std::thread;
 
         let dir = tempfile::tempdir().unwrap();
         let runner = StubWorkerRunner::new(StubBehavior::Hang);
@@ -408,5 +330,35 @@ mod tests {
         assert_eq!(outcome.worker_profile(), "stub's \"quoted\"");
         let loaded = decode_outcome(&fs::read(dir.path().join("outcome.json")).unwrap()).unwrap();
         assert_eq!(loaded.worker_profile(), "stub's \"quoted\"");
+    }
+
+    #[test]
+    fn channel_behaviors_are_classified_not_prose() {
+        let dir = tempfile::tempdir().unwrap();
+        let work = work();
+        let request = RunRequest {
+            work: &work,
+            workspace_root: dir.path(),
+            budget: Duration::from_secs(1),
+        };
+        let fail = StubWorkerRunner::new(StubBehavior::ChannelFail)
+            .run(&request)
+            .unwrap_err();
+        assert!(matches!(err_channel(&fail), ChannelReaction::Fail));
+        let park = StubWorkerRunner::new(StubBehavior::ChannelPark)
+            .run(&request)
+            .unwrap_err();
+        assert!(matches!(err_channel(&park), ChannelReaction::Park));
+        let retry = StubWorkerRunner::new(StubBehavior::ChannelRetry)
+            .run(&request)
+            .unwrap_err();
+        assert!(matches!(err_channel(&retry), ChannelReaction::Retry));
+    }
+
+    fn err_channel(err: &AppError) -> ChannelReaction {
+        match err {
+            AppError::Channel(reaction) => *reaction,
+            other => panic!("expected channel error, got {other}"),
+        }
     }
 }

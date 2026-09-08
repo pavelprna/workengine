@@ -14,10 +14,10 @@ mod start;
 pub use clock::{Clock, SystemClock};
 pub use complete::complete;
 pub use create::create;
-pub use error::AppError;
+pub use error::{AppError, ChannelReaction};
 pub use next::next;
 pub use park::{park, recover_unconfirmed};
-pub use ports::{RunRequest, WorkStore, WorkerRunner, WorkspaceFactory};
+pub use ports::{BindRequest, RunRequest, StartRequest, WorkStore, WorkerRunner, WorkspaceFactory};
 pub use start::start;
 
 #[cfg(test)]

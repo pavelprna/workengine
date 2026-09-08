@@ -8,7 +8,8 @@ use workengine_adapters_store::SqliteStore;
 use workengine_adapters_worker::{StubBehavior, StubWorkerRunner, decode_outcome};
 use workengine_adapters_workspace::DirWorkspaceFactory;
 use workengine_application::{
-    AppError, SystemClock, WorkStore, complete, create, next, park, recover_unconfirmed, start,
+    AppError, StartRequest, SystemClock, WorkStore, complete, create, next, park,
+    recover_unconfirmed, start,
 };
 use workengine_domain::{DomainError, OutcomeKind, WorkId, WorkStatus};
 
@@ -37,6 +38,9 @@ struct Cli {
     /// Worker time budget in milliseconds. Hidden; default 60000.
     #[arg(long, env = "WORKENGINE_BUDGET_MS", hide = true)]
     budget_ms: Option<u64>,
+    /// Extra channel retries. Hidden; default 0.
+    #[arg(long, env = "WORKENGINE_RETRY_LIMIT", hide = true)]
+    retry_limit: Option<u32>,
     #[command(subcommand)]
     command: Command,
 }
@@ -60,6 +64,9 @@ enum Command {
     Start {
         #[arg(long)]
         work: String,
+        /// Copy this directory into the workspace on first bind
+        #[arg(long)]
+        checkout: Option<PathBuf>,
     },
     /// Apply an outcome file to leftover running or parked Work
     Complete {
@@ -110,7 +117,7 @@ fn run() -> anyhow::Result<u8> {
             }
             Ok(0)
         }
-        Command::Start { work } => {
+        Command::Start { work, checkout } => {
             let mut store = open_store(&data_dir, true)?;
             let workspaces = DirWorkspaceFactory::new(&data_dir);
             let behavior: StubBehavior = cli
@@ -123,7 +130,18 @@ fn run() -> anyhow::Result<u8> {
                 .budget_ms
                 .map(Duration::from_millis)
                 .unwrap_or(DEFAULT_BUDGET);
-            let work = start(&mut store, &workspaces, &runner, &SystemClock, &id, budget)?;
+            let work = start(
+                &mut store,
+                &workspaces,
+                &runner,
+                &SystemClock,
+                &StartRequest {
+                    id: &id,
+                    budget,
+                    retry_limit: cli.retry_limit.unwrap_or(0),
+                    checkout: checkout.as_deref(),
+                },
+            )?;
             println!("{} {}", work.id(), work.status());
             Ok(exit_for_status(work.status(), outcome_kind(&store, &id)?))
         }
@@ -197,7 +215,7 @@ fn exit_status(err: &anyhow::Error) -> u8 {
             AppError::OutcomeSchema(_) => 30,
             AppError::Workspace(_) => 40,
             AppError::NotFound(_) => 2,
-            AppError::Domain(_) | AppError::Worker(_) => 1,
+            AppError::Domain(_) | AppError::Worker(_) | AppError::Channel(_) => 1,
         };
     }
     2

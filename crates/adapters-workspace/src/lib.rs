@@ -5,10 +5,11 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use workengine_application::{AppError, WorkspaceFactory};
+use workengine_application::{AppError, BindRequest, WorkspaceFactory};
 use workengine_domain::{OutcomeKind, WorkId, WorkStatus};
 
 const MEMORY_SCHEMA_VERSION: u32 = 1;
+pub const GOAL_FILE: &str = "workengine-goal.txt";
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -39,9 +40,14 @@ impl DirWorkspaceFactory {
 }
 
 impl WorkspaceFactory for DirWorkspaceFactory {
-    fn bind(&self, work_id: &WorkId) -> Result<PathBuf, AppError> {
-        let path = self.dir(work_id);
+    fn bind(&self, request: &BindRequest<'_>) -> Result<PathBuf, AppError> {
+        let path = self.dir(request.work_id);
+        let existed = path.exists();
         fs::create_dir_all(&path).map_err(AppError::workspace)?;
+        if !existed && let Some(checkout) = request.checkout {
+            copy_tree(checkout, &path)?;
+        }
+        fs::write(path.join(GOAL_FILE), request.goal).map_err(AppError::workspace)?;
         Ok(path)
     }
 
@@ -78,6 +84,43 @@ impl WorkspaceFactory for DirWorkspaceFactory {
     }
 }
 
+fn copy_tree(src: &Path, dest: &Path) -> Result<(), AppError> {
+    if !src.is_dir() {
+        return Err(AppError::workspace(format!(
+            "checkout is not a directory: {}",
+            src.display()
+        )));
+    }
+    let src = src.canonicalize().map_err(AppError::workspace)?;
+    let dest = dest.canonicalize().map_err(AppError::workspace)?;
+    if src == dest {
+        return Err(AppError::workspace("checkout is the workspace root"));
+    }
+    copy_dir(&src, &dest, &dest)
+}
+
+fn copy_dir(src: &Path, dest: &Path, skip: &Path) -> Result<(), AppError> {
+    fs::create_dir_all(dest).map_err(AppError::workspace)?;
+    for entry in fs::read_dir(src).map_err(AppError::workspace)? {
+        let entry = entry.map_err(AppError::workspace)?;
+        let from = entry.path();
+        if from == *skip || skip.starts_with(&from) {
+            continue;
+        }
+        let ty = entry.file_type().map_err(AppError::workspace)?;
+        if ty.is_symlink() {
+            continue;
+        }
+        let to = dest.join(entry.file_name());
+        if ty.is_dir() {
+            copy_dir(&from, &to, skip)?;
+        } else if ty.is_file() {
+            fs::copy(from, &to).map_err(AppError::workspace)?;
+        }
+    }
+    Ok(())
+}
+
 fn encode_memory(
     work_id: &WorkId,
     status: WorkStatus,
@@ -105,14 +148,26 @@ mod tests {
     use super::*;
     use workengine_domain::WorkId;
 
+    fn bind(
+        factory: &DirWorkspaceFactory,
+        id: &WorkId,
+        checkout: Option<&Path>,
+    ) -> Result<PathBuf, AppError> {
+        factory.bind(&BindRequest {
+            work_id: id,
+            goal: "do the thing",
+            checkout,
+        })
+    }
+
     #[test]
     fn two_work_ids_do_not_share_a_root() {
         let dir = tempfile::tempdir().unwrap();
         let factory = DirWorkspaceFactory::new(dir.path());
         let a = WorkId::parse("work-a").unwrap();
         let b = WorkId::parse("work-b").unwrap();
-        let pa = factory.bind(&a).unwrap();
-        let pb = factory.bind(&b).unwrap();
+        let pa = bind(&factory, &a, None).unwrap();
+        let pb = bind(&factory, &b, None).unwrap();
         assert_ne!(pa, pb);
         assert!(pa.starts_with(dir.path().join("workspaces")));
         assert!(pb.starts_with(dir.path().join("workspaces")));
@@ -133,7 +188,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let factory = DirWorkspaceFactory::new(dir.path());
         let a = WorkId::parse("work-a").unwrap();
-        factory.bind(&a).unwrap();
+        bind(&factory, &a, None).unwrap();
         factory
             .record_memory(&a, WorkStatus::Succeeded, OutcomeKind::Succeeded)
             .unwrap();
@@ -164,5 +219,55 @@ mod tests {
         let rust: Vec<&str> = OutcomeKind::ALL.iter().map(|k| k.as_str()).collect();
         assert_eq!(kinds, rust);
         assert_eq!(schema["properties"]["schemaVersion"]["const"], 1);
+    }
+
+    #[test]
+    fn bind_writes_the_goal_as_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let factory = DirWorkspaceFactory::new(dir.path());
+        let a = WorkId::parse("work-a").unwrap();
+        let path = bind(&factory, &a, None).unwrap();
+        assert_eq!(
+            fs::read_to_string(path.join(GOAL_FILE)).unwrap(),
+            "do the thing"
+        );
+    }
+
+    #[test]
+    fn bind_copies_checkout_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("hello.txt"), "from-source").unwrap();
+        let factory = DirWorkspaceFactory::new(dir.path());
+        let a = WorkId::parse("work-a").unwrap();
+        let path = bind(&factory, &a, Some(&src)).unwrap();
+        assert_eq!(
+            fs::read_to_string(path.join("hello.txt")).unwrap(),
+            "from-source"
+        );
+        fs::write(path.join("hello.txt"), "worker-edit").unwrap();
+        fs::write(src.join("hello.txt"), "source-changed").unwrap();
+        let again = bind(&factory, &a, Some(&src)).unwrap();
+        assert_eq!(again, path);
+        assert_eq!(
+            fs::read_to_string(path.join("hello.txt")).unwrap(),
+            "worker-edit"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_skips_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("real.txt"), "ok").unwrap();
+        std::os::unix::fs::symlink("/etc/passwd", src.join("link")).unwrap();
+        let factory = DirWorkspaceFactory::new(dir.path());
+        let a = WorkId::parse("work-a").unwrap();
+        let path = bind(&factory, &a, Some(&src)).unwrap();
+        assert!(path.join("real.txt").exists());
+        assert!(!path.join("link").exists());
     }
 }

@@ -392,3 +392,61 @@ fn data_dir_lock_rejects_a_second_cli() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn channel_park_exits_parked() {
+    let dir = tempfile::tempdir().unwrap();
+    let id = create_work(dir.path());
+    let start = bin()
+        .env("WORKENGINE_STUB_BEHAVIOR", "channel_park")
+        .args([
+            "--data-dir",
+            dir.path().to_str().unwrap(),
+            "start",
+            "--work",
+            &id,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        start.status.success(),
+        "channel park stderr: {}",
+        String::from_utf8_lossy(&start.stderr)
+    );
+    assert!(stdout(&start).ends_with(" parked"));
+}
+
+#[test]
+fn start_copies_checkout_and_writes_the_goal() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("hello.txt"), "copied").unwrap();
+    let id = create_work(dir.path());
+    let start = bin()
+        .args([
+            "--data-dir",
+            dir.path().to_str().unwrap(),
+            "start",
+            "--work",
+            &id,
+            "--checkout",
+            src.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        start.status.success(),
+        "start failed: {}",
+        String::from_utf8_lossy(&start.stderr)
+    );
+    let ws = dir.path().join("workspaces").join(&id);
+    assert_eq!(
+        std::fs::read_to_string(ws.join("hello.txt")).unwrap(),
+        "copied"
+    );
+    assert_eq!(
+        std::fs::read_to_string(ws.join("workengine-goal.txt")).unwrap(),
+        "do the thing"
+    );
+}

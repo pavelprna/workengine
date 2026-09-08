@@ -2,6 +2,30 @@ use std::fmt;
 
 use workengine_domain::{DomainError, WorkId};
 
+/// Reaction Workengine takes for a channel error. Not parsed from Worker prose.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ChannelReaction {
+    Retry,
+    Fail,
+    Park,
+}
+
+impl ChannelReaction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Retry => "retry",
+            Self::Fail => "fail",
+            Self::Park => "park",
+        }
+    }
+}
+
+impl fmt::Display for ChannelReaction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Application and port errors. Domain errors stay distinguishable for CLI exit codes.
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
@@ -19,6 +43,8 @@ pub enum AppError {
     Worker(String),
     #[error("outcome schema: {0}")]
     OutcomeSchema(String),
+    #[error("channel error ({0})")]
+    Channel(ChannelReaction),
 }
 
 impl AppError {

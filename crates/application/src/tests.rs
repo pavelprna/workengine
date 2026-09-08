@@ -8,8 +8,10 @@ use workengine_domain::{
 };
 
 use crate::clock::Clock;
-use crate::error::AppError;
-use crate::ports::{RunRequest, WorkStore, WorkerRunner, WorkspaceFactory};
+use crate::error::{AppError, ChannelReaction};
+use crate::ports::{
+    BindRequest, RunRequest, StartRequest, WorkStore, WorkerRunner, WorkspaceFactory,
+};
 use crate::{complete, create, next, park, recover_unconfirmed, start};
 
 const BUDGET: Duration = Duration::from_secs(5);
@@ -60,11 +62,15 @@ impl WorkStore for FakeStore {
 struct FakeWorkspace {
     artifacts: HashMap<String, Vec<u8>>,
     memory: RefCell<HashMap<String, Vec<(WorkStatus, OutcomeKind)>>>,
+    goals: RefCell<HashMap<String, String>>,
 }
 
 impl WorkspaceFactory for FakeWorkspace {
-    fn bind(&self, work_id: &WorkId) -> Result<PathBuf, AppError> {
-        Ok(PathBuf::from(format!("/workspace/{work_id}")))
+    fn bind(&self, request: &BindRequest<'_>) -> Result<PathBuf, AppError> {
+        self.goals
+            .borrow_mut()
+            .insert(request.work_id.as_str().to_owned(), request.goal.to_owned());
+        Ok(PathBuf::from(format!("/workspace/{}", request.work_id)))
     }
 
     fn read_artifact(&self, work_id: &WorkId) -> Result<Option<Vec<u8>>, AppError> {
@@ -130,7 +136,29 @@ fn start_work(
     clock: &FakeClock,
     id: &WorkId,
 ) -> Result<Work, AppError> {
-    start(store, ws, runner, clock, id, BUDGET)
+    start_work_with(store, ws, runner, clock, id, 0)
+}
+
+fn start_work_with(
+    store: &mut FakeStore,
+    ws: &FakeWorkspace,
+    runner: &impl WorkerRunner,
+    clock: &FakeClock,
+    id: &WorkId,
+    retry_limit: u32,
+) -> Result<Work, AppError> {
+    start(
+        store,
+        ws,
+        runner,
+        clock,
+        &StartRequest {
+            id,
+            budget: BUDGET,
+            retry_limit,
+            checkout: None,
+        },
+    )
 }
 
 #[test]
@@ -438,4 +466,145 @@ fn runner_error_completes_as_channel_error_without_returning_err() {
     assert_eq!(done.status(), WorkStatus::Failed);
     let last = store.events(work.id()).unwrap().pop().unwrap();
     assert_eq!(last.outcome_kind(), Some(OutcomeKind::ChannelError));
+}
+
+struct ChannelRunner {
+    runs: Cell<u32>,
+    reactions: Vec<ChannelReaction>,
+    then: Option<OutcomeKind>,
+}
+
+impl WorkerRunner for ChannelRunner {
+    fn run(&self, request: &RunRequest<'_>) -> Result<Outcome, AppError> {
+        let i = self.runs.get() as usize;
+        self.runs.set(self.runs.get() + 1);
+        if i < self.reactions.len() {
+            return Err(AppError::Channel(self.reactions[i]));
+        }
+        let kind = self.then.unwrap_or(OutcomeKind::Succeeded);
+        Outcome::new(
+            OUTCOME_SCHEMA_VERSION,
+            kind,
+            request.work.attributes().worker_profile(),
+        )
+        .map_err(AppError::from)
+    }
+
+    fn decode(&self, _bytes: &[u8]) -> Result<Outcome, AppError> {
+        Err(AppError::worker("unused"))
+    }
+}
+
+#[test]
+fn channel_fail_completes_failed_without_retry() {
+    let mut store = FakeStore::default();
+    let ws = FakeWorkspace::default();
+    let clock = FakeClock { unix_ms: 1 };
+    let work = ready_work(&mut store, &clock);
+    let runner = ChannelRunner {
+        runs: Cell::new(0),
+        reactions: vec![ChannelReaction::Fail],
+        then: None,
+    };
+    let done = start_work_with(&mut store, &ws, &runner, &clock, work.id(), 3).unwrap();
+    assert_eq!(done.status(), WorkStatus::Failed);
+    assert_eq!(runner.runs.get(), 1);
+    let last = store.events(work.id()).unwrap().pop().unwrap();
+    assert_eq!(last.outcome_kind(), Some(OutcomeKind::ChannelError));
+}
+
+#[test]
+fn channel_park_parks_the_same_work_without_complete() {
+    let mut store = FakeStore::default();
+    let ws = FakeWorkspace::default();
+    let clock = FakeClock { unix_ms: 1 };
+    let work = ready_work(&mut store, &clock);
+    let runner = ChannelRunner {
+        runs: Cell::new(0),
+        reactions: vec![ChannelReaction::Park],
+        then: None,
+    };
+    let done = start_work(&mut store, &ws, &runner, &clock, work.id()).unwrap();
+    assert_eq!(done.status(), WorkStatus::Parked);
+    assert_eq!(done.id(), work.id());
+    assert!(ws.memory.borrow().get(work.id().as_str()).is_none());
+    let kinds: Vec<_> = store
+        .events(work.id())
+        .unwrap()
+        .iter()
+        .map(|e| e.kind())
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![
+            workengine_domain::EventKind::Created,
+            workengine_domain::EventKind::Started,
+            workengine_domain::EventKind::Parked,
+        ]
+    );
+}
+
+#[test]
+fn channel_retry_respawns_inside_start_then_succeeds() {
+    let mut store = FakeStore::default();
+    let ws = FakeWorkspace::default();
+    let clock = FakeClock { unix_ms: 1 };
+    let work = ready_work(&mut store, &clock);
+    let runner = ChannelRunner {
+        runs: Cell::new(0),
+        reactions: vec![ChannelReaction::Retry, ChannelReaction::Retry],
+        then: Some(OutcomeKind::Succeeded),
+    };
+    let done = start_work_with(&mut store, &ws, &runner, &clock, work.id(), 2).unwrap();
+    assert_eq!(done.status(), WorkStatus::Succeeded);
+    assert_eq!(runner.runs.get(), 3);
+    let kinds: Vec<_> = store
+        .events(work.id())
+        .unwrap()
+        .iter()
+        .map(|e| e.kind())
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![
+            workengine_domain::EventKind::Created,
+            workengine_domain::EventKind::Started,
+            workengine_domain::EventKind::Completed,
+        ]
+    );
+}
+
+#[test]
+fn channel_retry_exhaustion_fails_closed() {
+    let mut store = FakeStore::default();
+    let ws = FakeWorkspace::default();
+    let clock = FakeClock { unix_ms: 1 };
+    let work = ready_work(&mut store, &clock);
+    let runner = ChannelRunner {
+        runs: Cell::new(0),
+        reactions: vec![ChannelReaction::Retry],
+        then: None,
+    };
+    let done = start_work_with(&mut store, &ws, &runner, &clock, work.id(), 0).unwrap();
+    assert_eq!(done.status(), WorkStatus::Failed);
+    assert_eq!(runner.runs.get(), 1);
+    let last = store.events(work.id()).unwrap().pop().unwrap();
+    assert_eq!(last.outcome_kind(), Some(OutcomeKind::ChannelError));
+}
+
+#[test]
+fn start_writes_the_goal_into_the_workspace_bind() {
+    let mut store = FakeStore::default();
+    let ws = FakeWorkspace::default();
+    let runner = FakeRunner::new(OutcomeKind::Succeeded);
+    let clock = FakeClock { unix_ms: 1 };
+    let work = ready_work(&mut store, &clock);
+    start_work(&mut store, &ws, &runner, &clock, work.id()).unwrap();
+    assert_eq!(
+        ws.goals
+            .borrow()
+            .get(work.id().as_str())
+            .map(String::as_str),
+        Some("do the thing")
+    );
 }
