@@ -66,8 +66,8 @@ The first CLI slice exposes `create`, `next`, `start`, `complete`, and `park`. T
 - **[TESTED]** Any two observers MUST see the same snapshot of a given Work.
 - **[UNTESTED]** A subscription to the event stream MUST be resumable without loss and without duplicates.
 - **[UNTESTED]** A Work summary MUST be structured. Operators MUST NOT have to parse raw logs to know status.
-- **[UNTESTED]** Output of every Workengine-supervised subprocess, including the Worker, MUST use one streaming format.
-- **[UNTESTED]** Each record in that stream MUST carry a mandatory set of accounting fields, including `work_id`.
+- **[TESTED]** Output of every Workengine-supervised subprocess, including the Worker, MUST use one streaming format.
+- **[TESTED]** Each record in that stream MUST carry a mandatory set of accounting fields, including `work_id`.
 - **[UNTESTED]** Navigation from a summary to raw artifacts MUST be a finite number of steps. Each significant step MUST leave a visible proof artifact.
 
 ## Operator park notifications

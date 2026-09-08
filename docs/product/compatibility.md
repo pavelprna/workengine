@@ -13,6 +13,7 @@ These are public contracts. A breaking change is a major version, plus a migrati
 | Surface | Compatibility |
 | --- | --- |
 | CLI command names (`create`, `next`, `start`, `complete`, `park`, `version`) | Stable |
+| CLI `version` prefix | `workengine <semver>` where semver is `CARGO_PKG_VERSION` |
 | CLI flags and env vars documented in `--help` | Stable |
 | Process exit codes | Stable; see table below |
 | Outcome JSON schema (`schemaVersion`) | Stable within a major; unknown fields must fail closed or be reserved |
@@ -26,6 +27,7 @@ Changing these is not a SemVer break.
 | Surface | Notes |
 | --- | --- |
 | Log line text | Structured fields (`work_id`, `event`, `schema_version`) are the contract, not the message |
+| Optional ` (<git sha>)` on `version` | Forensic build id when compiled from git; not a version scheme |
 | JSON key order | Parsers MUST NOT depend on order |
 | Internal crate and module names | `workengine-domain` is not a public library API |
 | Adapter internals, SQL without `schemaVersion` | Private |
