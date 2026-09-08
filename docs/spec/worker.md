@@ -31,13 +31,13 @@ This document is the canonical behaviour of Worker. Keywords follow [RFC 2119](h
 - **[TESTED]** Each Worker run MUST have a hard budget (time, and later tokens or other meters the profile declares).
 - **[TESTED]** Accounting of spend and remaining budget MUST be Workengine's duty, not the Worker's.
 - **[TESTED]** Workengine MUST detect a hung Worker independently of the Worker process (watchdog outside the child). First-slice hang detection is that wall-clock deadline; `timed_out` and `budget_exceeded` remain distinct outcome kinds assigned by the runner. A silence watchdog (no output before the budget) is a later adapter concern.
-- **[UNTESTED]** Channel errors toward a model MUST be classified by the reaction Workengine will take (retry, fail, park), not by parsing prose.
+- **[TESTED]** Channel errors toward a model MUST be classified by the reaction Workengine will take (retry, fail, park), not by parsing prose.
 
 ## Isolation and safety
 
 - **[UNTESTED]** A Worker's permission profile MUST be deny-by-default. Extra rights require an explicit enable.
 - **[UNTESTED]** A Worker MUST NOT be able to perform known-destructive actions against the host environment (for example wipe paths outside its workspace).
-- **[UNTESTED]** A Worker MUST receive only the minimum resources and secrets required for that run.
+- **[TESTED]** A Worker MUST receive only the minimum resources and secrets required for that run. First-slice process env is empty except declared `fromEnv` references.
 - **[UNTESTED]** Secrets passed to a Worker MUST NOT leak through Workengine logs or process inspection surfaces that Workengine controls.
 - **[UNTESTED]** Text from untrusted sources (inbound tickets, web, prior artifacts) MUST be treated as data, not as instructions to Workengine.
 

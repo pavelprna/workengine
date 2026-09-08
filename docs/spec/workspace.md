@@ -6,7 +6,7 @@ This document is the canonical behaviour of Workspace. Keywords follow [RFC 2119
 
 ## Isolation
 
-- **[UNTESTED]** Each Work MUST receive its own isolated workspace and its own isolated working copy of source.
+- **[TESTED]** Each Work MUST receive its own isolated workspace and its own isolated working copy of source. First bind MAY copy an operator checkout into that root; a later bind MUST NOT recopy.
 - **[TESTED]** Two Work instances MUST NOT share a workspace directory.
 - **[TESTED]** A Workspace MUST be uniquely addressable from its Work for the whole life of that Work.
 
@@ -14,7 +14,7 @@ This document is the canonical behaviour of Workspace. Keywords follow [RFC 2119
 
 - **[UNTESTED]** A Worker MUST NOT be able to access paths outside the workspace root that Workengine assigned.
 - **[TESTED]** The first runtime slice MAY implement containment as a dedicated directory. Later adapters MAY use git worktrees or containers behind the same `WorkspaceFactory` port.
-- **[TESTED]** The first-slice dedicated directory MUST be uniquely derived from `WorkId`. It MAY start empty; copying an operator checkout is not required of this slice.
+- **[TESTED]** The first-slice dedicated directory MUST be uniquely derived from `WorkId`. It MAY start empty; copying an operator checkout is optional and happens only on first bind.
 - **[UNTESTED]** Workengine's own operations on a codebase MUST be isolated from user-supplied environment settings that a Worker could change.
 
 ## Lifecycle

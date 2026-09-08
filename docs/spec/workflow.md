@@ -33,8 +33,8 @@ The first CLI slice exposes `create`, `next`, `start`, `complete`, and `park`. T
 - **[TESTED]** `create` MUST persist a new Work as `ready` with a `Created` event, atomically, and MUST NOT spawn a Worker.
 - **[TESTED]** `next` MUST select Work according to the store and the FSM, not by asking a model which item or phase to take.
 - **[TESTED]** First-slice `next` MUST return the oldest `ready` Work, else the oldest `parked` Work. It MUST NOT select `running`, `succeeded`, or `failed`. It MUST NOT spawn a Worker.
-- **[TESTED]** `start` MUST bind a Workspace and spawn a Worker only when the Work is `ready` or `parked` and the FSM allows it. The Work then becomes `running`.
-- **[TESTED]** After the Worker process exits, `start` MUST apply `complete` from the closed outcome. The CLI happy path is one `start` invocation: spawn, wait, record.
+- **[TESTED]** `start` MUST bind a Workspace and spawn a Worker only when the Work is `ready` or `parked` and the FSM allows it. The Work then becomes `running`. The goal is written into the workspace as data. Channel retry re-spawns inside this invocation; the retry limit is snapshotted. Channel park uses `park`, not `complete`.
+- **[TESTED]** After the Worker process exits with a closed outcome, `start` MUST apply `complete`. The CLI happy path is one `start` invocation: spawn, wait, record.
 - **[TESTED]** `complete` MUST apply a closed outcome and persist status plus event atomically, following the table above.
 - **[TESTED]** `complete` as a CLI verb (`complete --file`) MUST exist for recovery: leftover `running` or `parked` Work, outcome artifact already written, control plane restarting before the status was committed.
 - **[TESTED]** If a workspace already contains a confirmed-looking outcome artifact after a leftover `running` Work was parked, `start` MUST apply `complete` from that artifact and MUST NOT spawn a second Worker. It MUST NOT append a second `Started` event.
@@ -78,9 +78,9 @@ The first CLI slice exposes `create`, `next`, `start`, `complete`, and `park`. T
 
 ## Configuration
 
-- **[UNTESTED]** Secrets in configuration MUST be stored by reference, never as inline values.
-- **[UNTESTED]** Configuration MUST be validated lazily: a broken part MUST NOT block unrelated Work.
-- **[UNTESTED]** Changing configuration MUST NOT rewrite the rules of Work that is already in flight.
+- **[TESTED]** Secrets in configuration MUST be stored by reference, never as inline values.
+- **[TESTED]** Configuration MUST be validated lazily: a broken part MUST NOT block unrelated Work. First-slice lazy validation is per named Worker profile in the config file.
+- **[TESTED]** Changing configuration MUST NOT rewrite the rules of Work that is already in flight. First-slice retry limit and checkout are snapshotted at `start`.
 
 ## Capture and scale
 
