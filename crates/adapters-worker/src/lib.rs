@@ -1,7 +1,9 @@
 //! Stub Worker: a real process that writes a schema-valid outcome.
 
 use std::fs;
+use std::path::Path;
 use std::process::{Command, Stdio};
+use std::str::FromStr;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -14,6 +16,21 @@ pub enum StubBehavior {
     Succeed,
     Fail,
     Hang,
+    ExceedBudget,
+}
+
+impl FromStr for StubBehavior {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "succeed" => Ok(Self::Succeed),
+            "fail" => Ok(Self::Fail),
+            "hang" => Ok(Self::Hang),
+            "exceed_budget" => Ok(Self::ExceedBudget),
+            other => Err(format!("unknown stub behavior {other}")),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -44,6 +61,7 @@ impl WorkerRunner for StubWorkerRunner {
             StubBehavior::Hang => run_hang(request, profile),
             StubBehavior::Succeed => run_writer(request, OutcomeKind::Succeeded, profile),
             StubBehavior::Fail => run_writer(request, OutcomeKind::Failed, profile),
+            StubBehavior::ExceedBudget => run_budget(request, profile),
         }
     }
 
@@ -93,25 +111,59 @@ fn run_writer(
         .stderr(Stdio::null());
     apply_process_group(&mut cmd);
     let mut child = cmd.spawn().map_err(AppError::worker)?;
-    wait_child(&mut child, request.budget)?;
-    decode_outcome(&fs::read(&dest).map_err(AppError::worker)?)
+    match wait_child(&mut child, request.budget)? {
+        ChildWait::Exited => decode_outcome(&fs::read(&dest).map_err(AppError::worker)?),
+        ChildWait::BudgetExceeded => {
+            persist_outcome(request.workspace_root, OutcomeKind::BudgetExceeded, profile)
+        }
+    }
 }
 
-fn wait_child(child: &mut std::process::Child, budget: Duration) -> Result<(), AppError> {
+enum ChildWait {
+    Exited,
+    BudgetExceeded,
+}
+
+fn wait_child(child: &mut std::process::Child, budget: Duration) -> Result<ChildWait, AppError> {
     let deadline = Instant::now() + budget;
     loop {
         match child.try_wait().map_err(AppError::worker)? {
-            Some(status) if status.success() => return Ok(()),
+            Some(status) if status.success() => return Ok(ChildWait::Exited),
             Some(status) => {
                 return Err(AppError::worker(format!("stub worker exited {status}")));
             }
             None if Instant::now() >= deadline => {
                 kill_group(child.id());
                 let _ = child.wait();
-                return Err(AppError::worker("stub worker exceeded budget"));
+                return Ok(ChildWait::BudgetExceeded);
             }
             None => thread::sleep(Duration::from_millis(5)),
         }
+    }
+}
+
+fn persist_outcome(root: &Path, kind: OutcomeKind, profile: &str) -> Result<Outcome, AppError> {
+    let outcome = Outcome::new(OUTCOME_SCHEMA_VERSION, kind, profile).map_err(AppError::from)?;
+    let json = encode_outcome(&outcome)?;
+    fs::write(root.join("outcome.json"), json).map_err(AppError::worker)?;
+    Ok(outcome)
+}
+
+fn run_budget(request: &RunRequest<'_>, profile: &str) -> Result<Outcome, AppError> {
+    fs::create_dir_all(request.workspace_root).map_err(AppError::worker)?;
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c")
+        .arg("exec sleep 30")
+        .current_dir(request.workspace_root)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    apply_process_group(&mut cmd);
+    let mut child = cmd.spawn().map_err(AppError::worker)?;
+    match wait_child(&mut child, request.budget)? {
+        ChildWait::BudgetExceeded => {
+            persist_outcome(request.workspace_root, OutcomeKind::BudgetExceeded, profile)
+        }
+        ChildWait::Exited => Err(AppError::worker("budget stub exited before budget")),
     }
 }
 
@@ -132,11 +184,7 @@ fn run_hang(request: &RunRequest<'_>, profile: &str) -> Result<Outcome, AppError
             None if Instant::now() >= deadline => {
                 kill_group(child.id());
                 let _ = child.wait();
-                let outcome = Outcome::new(OUTCOME_SCHEMA_VERSION, OutcomeKind::TimedOut, profile)?;
-                let json = encode_outcome(&outcome)?;
-                fs::write(request.workspace_root.join("outcome.json"), json)
-                    .map_err(AppError::worker)?;
-                return Ok(outcome);
+                return persist_outcome(request.workspace_root, OutcomeKind::TimedOut, profile);
             }
             None => thread::sleep(Duration::from_millis(10)),
         }
@@ -233,5 +281,22 @@ mod tests {
         thread::sleep(Duration::from_millis(20));
         let alive = kill(Pid::from_raw(child_pid), None);
         assert!(alive.is_err(), "grandchild sleep should be dead: {alive:?}");
+    }
+
+    #[test]
+    fn writer_timeout_is_budget_exceeded_not_channel_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = StubWorkerRunner::new(StubBehavior::ExceedBudget);
+        let work = work();
+        let outcome = runner
+            .run(&RunRequest {
+                work: &work,
+                workspace_root: dir.path(),
+                budget: Duration::from_millis(80),
+            })
+            .unwrap();
+        assert_eq!(outcome.kind(), OutcomeKind::BudgetExceeded);
+        let loaded = decode_outcome(&fs::read(dir.path().join("outcome.json")).unwrap()).unwrap();
+        assert_eq!(loaded.kind(), OutcomeKind::BudgetExceeded);
     }
 }
