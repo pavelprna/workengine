@@ -23,7 +23,7 @@ This document is the canonical behaviour of Workspace. Keywords follow [RFC 2119
 
 ## Memory
 
-- **[UNTESTED]** A workspace MAY keep cumulative memory. That memory is a property of the workspace, not of a single Work run.
+- **[UNTESTED]** A workspace MUST have cumulative memory. That memory is a property of the workspace, not of a single Work run.
 - **[UNTESTED]** Workspace memory MUST be append-only.
 - **[UNTESTED]** Workengine MUST write to workspace memory only after a confirmed Work outcome. A still-running or aborted Worker MUST NOT be treated as confirmed.
 
