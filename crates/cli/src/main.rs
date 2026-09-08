@@ -123,7 +123,7 @@ fn run() -> anyhow::Result<u8> {
                 .budget_ms
                 .map(Duration::from_millis)
                 .unwrap_or(DEFAULT_BUDGET);
-            let work = start(&mut store, &workspaces, &runner, &id, budget)?;
+            let work = start(&mut store, &workspaces, &runner, &SystemClock, &id, budget)?;
             println!("{} {}", work.id(), work.status());
             Ok(exit_for_status(work.status(), outcome_kind(&store, &id)?))
         }
@@ -133,14 +133,14 @@ fn run() -> anyhow::Result<u8> {
             let bytes = std::fs::read(&file).with_context(|| format!("read {}", file.display()))?;
             let outcome = decode_outcome(&bytes).map_err(anyhow::Error::from)?;
             let id = WorkId::parse(work)?;
-            let done = complete(&mut store, &workspaces, &id, &outcome)?;
+            let done = complete(&mut store, &workspaces, &SystemClock, &id, &outcome)?;
             println!("{} {}", done.id(), done.status());
             Ok(exit_for_status(done.status(), Some(outcome.kind())))
         }
         Command::Park { work } => {
             let mut store = open_store(&data_dir, true)?;
             let id = WorkId::parse(work)?;
-            let parked = park(&mut store, &id)?;
+            let parked = park(&mut store, &SystemClock, &id)?;
             println!("{} {}", parked.id(), parked.status());
             Ok(0)
         }
@@ -169,7 +169,7 @@ fn version_line() -> String {
 fn open_store(data_dir: &std::path::Path, recover: bool) -> anyhow::Result<SqliteStore> {
     let mut store = SqliteStore::open(data_dir)?;
     if recover {
-        recover_unconfirmed(&mut store)?;
+        recover_unconfirmed(&mut store, &SystemClock)?;
     }
     Ok(store)
 }

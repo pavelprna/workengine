@@ -25,4 +25,6 @@ pub enum DomainError {
     EmptyReplay,
     #[error("complete conflicts with terminal status {0}")]
     TerminalConflict(WorkStatus),
+    #[error("cannot bind workspace in status {0}")]
+    CannotBindWorkspace(WorkStatus),
 }

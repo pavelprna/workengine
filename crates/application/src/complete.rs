@@ -1,5 +1,6 @@
 use workengine_domain::{Apply, Outcome, Work, WorkEvent, WorkId};
 
+use crate::clock::Clock;
 use crate::error::AppError;
 use crate::ports::{WorkStore, WorkspaceFactory};
 
@@ -7,6 +8,7 @@ use crate::ports::{WorkStore, WorkspaceFactory};
 pub fn complete(
     store: &mut impl WorkStore,
     workspaces: &impl WorkspaceFactory,
+    clock: &impl Clock,
     id: &WorkId,
     outcome: &Outcome,
 ) -> Result<Work, AppError> {
@@ -17,7 +19,10 @@ pub fn complete(
     match work.complete(outcome)? {
         Apply::Idempotent { .. } => Ok(work),
         Apply::Changed { to, .. } => {
-            store.put(&work, WorkEvent::completed(&work, from, outcome.kind()))?;
+            store.put(
+                &work,
+                WorkEvent::completed(&work, from, outcome.kind(), clock.unix_ms()),
+            )?;
             let entry = format!(
                 r#"{{"schemaVersion":1,"workId":"{}","status":"{}","outcomeKind":"{}"}}"#,
                 work.id(),

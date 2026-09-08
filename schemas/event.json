@@ -40,6 +40,10 @@
       ]
     },
     "workspaceRoot": { "type": ["string", "null"] },
-    "createdAtUnixMs": { "type": "integer", "minimum": 0 }
+    "createdAtUnixMs": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "When this event occurred. On created, that is Work birth time."
+    }
   }
 }

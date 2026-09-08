@@ -287,7 +287,7 @@ mod tests {
         let from = running.status();
         running.start().unwrap();
         let err = store
-            .put(&running, WorkEvent::started(&running, from))
+            .put(&running, WorkEvent::started(&running, from, 8))
             .unwrap_err();
         assert!(matches!(err, AppError::Store(_)));
         let loaded = store.get(work.id()).unwrap().unwrap();
@@ -302,15 +302,17 @@ mod tests {
         store.put(&work, WorkEvent::created(&work)).unwrap();
         let from = work.status();
         work.start().unwrap();
-        work.bind_workspace("/ws/work-1");
-        store.put(&work, WorkEvent::started(&work, from)).unwrap();
+        work.bind_workspace("/ws/work-1").unwrap();
+        store
+            .put(&work, WorkEvent::started(&work, from, 8))
+            .unwrap();
         let outcome = Outcome::new(OUTCOME_SCHEMA_VERSION, OutcomeKind::Succeeded, "stub").unwrap();
         let from = work.status();
         work.complete(&outcome).unwrap();
         store
             .put(
                 &work,
-                WorkEvent::completed(&work, from, OutcomeKind::Succeeded),
+                WorkEvent::completed(&work, from, OutcomeKind::Succeeded, 9),
             )
             .unwrap();
         let snapshot = store.get(work.id()).unwrap().unwrap();

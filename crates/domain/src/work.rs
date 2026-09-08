@@ -104,9 +104,16 @@ impl Work {
         self.created_at_unix_ms
     }
 
-    /// Bind the isolated workspace address. Allowed while `running` after `start`.
-    pub fn bind_workspace(&mut self, root: impl Into<String>) {
-        self.workspace_root = Some(root.into());
+    /// Bind the isolated workspace address.
+    /// Allowed in `ready`, `parked`, or `running`. Terminal Work keeps its root.
+    pub fn bind_workspace(&mut self, root: impl Into<String>) -> Result<(), DomainError> {
+        match self.status {
+            WorkStatus::Ready | WorkStatus::Parked | WorkStatus::Running => {
+                self.workspace_root = Some(root.into());
+                Ok(())
+            }
+            other => Err(DomainError::CannotBindWorkspace(other)),
+        }
     }
 
     /// `ready` or `parked` → `running`. A leftover `running` is not start: recover parks first.
@@ -337,6 +344,27 @@ mod tests {
                 via: "start",
                 ..
             })
+        ));
+    }
+
+    #[test]
+    fn bind_workspace_is_allowed_before_and_during_run() {
+        let mut w = work();
+        w.bind_workspace("/ws").unwrap();
+        w.start().unwrap();
+        w.bind_workspace("/ws").unwrap();
+        w.park().unwrap();
+        w.bind_workspace("/ws").unwrap();
+    }
+
+    #[test]
+    fn bind_workspace_is_rejected_when_terminal() {
+        let mut w = work();
+        w.start().unwrap();
+        w.complete(&outcome(OutcomeKind::Succeeded)).unwrap();
+        assert!(matches!(
+            w.bind_workspace("/ws"),
+            Err(DomainError::CannotBindWorkspace(WorkStatus::Succeeded))
         ));
     }
 }

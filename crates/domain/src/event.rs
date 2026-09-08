@@ -99,6 +99,7 @@ impl WorkEvent {
         from: Option<WorkStatus>,
         to: WorkStatus,
         outcome_kind: Option<OutcomeKind>,
+        unix_ms: u64,
     ) -> Self {
         Self {
             schema_version: EVENT_SCHEMA_VERSION,
@@ -115,41 +116,51 @@ impl WorkEvent {
                 EventKind::Created => None,
                 _ => work.workspace_root().map(str::to_owned),
             },
-            created_at_unix_ms: work.created_at_unix_ms(),
+            created_at_unix_ms: unix_ms,
         }
     }
 
     pub fn created(work: &Work) -> Self {
-        Self::at(work, EventKind::Created, None, WorkStatus::Ready, None)
+        Self::at(
+            work,
+            EventKind::Created,
+            None,
+            WorkStatus::Ready,
+            None,
+            work.created_at_unix_ms(),
+        )
     }
 
-    pub fn started(work: &Work, from: WorkStatus) -> Self {
+    pub fn started(work: &Work, from: WorkStatus, unix_ms: u64) -> Self {
         Self::at(
             work,
             EventKind::Started,
             Some(from),
             WorkStatus::Running,
             None,
+            unix_ms,
         )
     }
 
-    pub fn completed(work: &Work, from: WorkStatus, kind: OutcomeKind) -> Self {
+    pub fn completed(work: &Work, from: WorkStatus, kind: OutcomeKind, unix_ms: u64) -> Self {
         Self::at(
             work,
             EventKind::Completed,
             Some(from),
             work.status(),
             Some(kind),
+            unix_ms,
         )
     }
 
-    pub fn parked(work: &Work, from: WorkStatus) -> Self {
+    pub fn parked(work: &Work, from: WorkStatus, unix_ms: u64) -> Self {
         Self::at(
             work,
             EventKind::Parked,
             Some(from),
             WorkStatus::Parked,
             None,
+            unix_ms,
         )
     }
 
@@ -215,7 +226,7 @@ pub fn replay(events: &[WorkEvent]) -> Result<Work, DomainError> {
             EventKind::Started => match work.start()? {
                 Apply::Changed { .. } => {
                     if let Some(root) = &event.workspace_root {
-                        work.bind_workspace(root.clone());
+                        work.bind_workspace(root.clone())?;
                     }
                 }
                 Apply::Idempotent { .. } => {}
@@ -254,18 +265,18 @@ mod tests {
         let created = WorkEvent::created(&work);
         let from_ready = work.status();
         work.start().unwrap();
-        work.bind_workspace("/tmp/w");
-        let started = WorkEvent::started(&work, from_ready);
+        work.bind_workspace("/tmp/w").unwrap();
+        let started = WorkEvent::started(&work, from_ready, 11);
         let from_running = work.status();
         work.park().unwrap();
-        let parked = WorkEvent::parked(&work, from_running);
+        let parked = WorkEvent::parked(&work, from_running, 12);
         let from_parked = work.status();
         work.start().unwrap();
-        let started_again = WorkEvent::started(&work, from_parked);
+        let started_again = WorkEvent::started(&work, from_parked, 13);
         let outcome = Outcome::new(1, OutcomeKind::Succeeded, "stub").unwrap();
         let from_running = work.status();
         work.complete(&outcome).unwrap();
-        let completed = WorkEvent::completed(&work, from_running, OutcomeKind::Succeeded);
+        let completed = WorkEvent::completed(&work, from_running, OutcomeKind::Succeeded, 14);
 
         let replayed = replay(&[created, started, parked, started_again, completed]).unwrap();
         assert_eq!(replayed.status(), WorkStatus::Succeeded);
@@ -279,18 +290,27 @@ mod tests {
         let created = WorkEvent::created(&work);
         let from_ready = work.status();
         work.start().unwrap();
-        work.bind_workspace("/tmp/w");
-        let started = WorkEvent::started(&work, from_ready);
+        work.bind_workspace("/tmp/w").unwrap();
+        let started = WorkEvent::started(&work, from_ready, 11);
         let from_running = work.status();
         work.park().unwrap();
-        let parked = WorkEvent::parked(&work, from_running);
+        let parked = WorkEvent::parked(&work, from_running, 12);
         let outcome = Outcome::new(1, OutcomeKind::Succeeded, "stub").unwrap();
         let from_parked = work.status();
         work.complete(&outcome).unwrap();
-        let completed = WorkEvent::completed(&work, from_parked, OutcomeKind::Succeeded);
+        let completed = WorkEvent::completed(&work, from_parked, OutcomeKind::Succeeded, 13);
 
         let replayed = replay(&[created, started, parked, completed]).unwrap();
         assert_eq!(replayed.status(), WorkStatus::Succeeded);
         assert_eq!(replayed.workspace_root(), Some("/tmp/w"));
+    }
+
+    #[test]
+    fn non_created_events_store_occurrence_time() {
+        let mut work = sample();
+        work.start().unwrap();
+        let started = WorkEvent::started(&work, WorkStatus::Ready, 99);
+        assert_eq!(started.created_at_unix_ms(), 99);
+        assert_eq!(WorkEvent::created(&work).created_at_unix_ms(), 10);
     }
 }
