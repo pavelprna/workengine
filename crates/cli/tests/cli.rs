@@ -9,6 +9,19 @@ fn stdout(output: &std::process::Output) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }
 
+fn mark_leftover_running(data_dir: &Path, id: &str) {
+    let conn = rusqlite::Connection::open(data_dir.join("workengine.sqlite")).unwrap();
+    conn.execute("UPDATE works SET status = 'running' WHERE id = ?1", [id])
+        .unwrap();
+    let ws = data_dir.join("workspaces").join(id);
+    std::fs::create_dir_all(&ws).unwrap();
+    std::fs::write(
+        ws.join("outcome.json"),
+        r#"{"schemaVersion":1,"kind":"succeeded","workerProfile":"stub"}"#,
+    )
+    .unwrap();
+}
+
 fn create_work(data_dir: &Path) -> String {
     let output = bin()
         .args([
@@ -74,7 +87,7 @@ fn create_next_start_succeeds() {
 }
 
 #[test]
-fn start_after_success_is_illegal_transition() {
+fn start_after_success_completes_from_leftover_artifact() {
     let dir = tempfile::tempdir().unwrap();
     let id = create_work(dir.path());
     let first = bin()
@@ -98,7 +111,12 @@ fn start_after_success_is_illegal_transition() {
         ])
         .output()
         .unwrap();
-    assert_eq!(second.status.code(), Some(10));
+    assert!(
+        second.status.success(),
+        "second start should complete from leftover artifact: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert!(stdout(&second).ends_with(" succeeded"));
 }
 
 #[test]
@@ -166,4 +184,88 @@ fn unknown_outcome_kind_is_schema_exit() {
 fn no_args_is_usage_error() {
     let output = bin().output().unwrap();
     assert_eq!(output.status.code(), Some(2));
+}
+
+#[test]
+fn complete_file_after_next_recovers_parked_leftover() {
+    let dir = tempfile::tempdir().unwrap();
+    let id = create_work(dir.path());
+    mark_leftover_running(dir.path(), &id);
+    let next = bin()
+        .args(["--data-dir", dir.path().to_str().unwrap(), "next"])
+        .output()
+        .unwrap();
+    assert!(next.status.success());
+    assert_eq!(stdout(&next), id);
+    let outcome = dir.path().join("workspaces").join(&id).join("outcome.json");
+    let again = bin()
+        .args([
+            "--data-dir",
+            dir.path().to_str().unwrap(),
+            "complete",
+            "--work",
+            &id,
+            "--file",
+            outcome.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        again.status.success(),
+        "complete after recover failed: {}",
+        String::from_utf8_lossy(&again.stderr)
+    );
+    assert!(stdout(&again).ends_with(" succeeded"));
+}
+
+#[cfg(unix)]
+#[test]
+fn hang_exits_timed_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let id = create_work(dir.path());
+    let start = bin()
+        .env("WORKENGINE_STUB_BEHAVIOR", "hang")
+        .env("WORKENGINE_BUDGET_MS", "80")
+        .args([
+            "--data-dir",
+            dir.path().to_str().unwrap(),
+            "start",
+            "--work",
+            &id,
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        start.status.code(),
+        Some(21),
+        "hang stderr: {}",
+        String::from_utf8_lossy(&start.stderr)
+    );
+    assert!(stdout(&start).ends_with(" failed"));
+}
+
+#[cfg(unix)]
+#[test]
+fn exceed_budget_exits_budget_exceeded() {
+    let dir = tempfile::tempdir().unwrap();
+    let id = create_work(dir.path());
+    let start = bin()
+        .env("WORKENGINE_STUB_BEHAVIOR", "exceed_budget")
+        .env("WORKENGINE_BUDGET_MS", "80")
+        .args([
+            "--data-dir",
+            dir.path().to_str().unwrap(),
+            "start",
+            "--work",
+            &id,
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        start.status.code(),
+        Some(20),
+        "budget stderr: {}",
+        String::from_utf8_lossy(&start.stderr)
+    );
+    assert!(stdout(&start).ends_with(" failed"));
 }

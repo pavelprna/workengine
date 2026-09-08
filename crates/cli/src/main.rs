@@ -26,6 +26,17 @@ struct Cli {
     /// Directory for the SQLite store and workspaces
     #[arg(long, env = "WORKENGINE_DATA_DIR")]
     data_dir: Option<PathBuf>,
+    /// Hidden first-slice knobs for the stub Worker. Not a public contract.
+    #[arg(
+        long,
+        env = "WORKENGINE_STUB_BEHAVIOR",
+        default_value = "succeed",
+        hide = true
+    )]
+    stub_behavior: String,
+    /// Worker time budget in milliseconds. Hidden; default 60000.
+    #[arg(long, env = "WORKENGINE_BUDGET_MS", hide = true)]
+    budget_ms: Option<u64>,
     #[command(subcommand)]
     command: Command,
 }
@@ -50,7 +61,7 @@ enum Command {
         #[arg(long)]
         work: String,
     },
-    /// Apply an outcome file to leftover running Work
+    /// Apply an outcome file to leftover running or parked Work
     Complete {
         #[arg(long)]
         work: String,
@@ -101,9 +112,17 @@ fn run() -> anyhow::Result<u8> {
         Command::Start { work } => {
             let mut store = open_store(&data_dir, true)?;
             let workspaces = DirWorkspaceFactory::new(&data_dir);
-            let runner = StubWorkerRunner::new(StubBehavior::Succeed);
+            let behavior: StubBehavior = cli
+                .stub_behavior
+                .parse()
+                .map_err(|err: String| anyhow::anyhow!(err))?;
+            let runner = StubWorkerRunner::new(behavior);
             let id = WorkId::parse(work)?;
-            let work = start(&mut store, &workspaces, &runner, &id, DEFAULT_BUDGET)?;
+            let budget = cli
+                .budget_ms
+                .map(Duration::from_millis)
+                .unwrap_or(DEFAULT_BUDGET);
+            let work = start(&mut store, &workspaces, &runner, &id, budget)?;
             println!("{} {}", work.id(), work.status());
             Ok(exit_for_status(work.status(), outcome_kind(&store, &id)?))
         }

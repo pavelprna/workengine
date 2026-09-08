@@ -554,6 +554,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "clap",
+ "rusqlite",
  "tempfile",
  "workengine-adapters-store",
  "workengine-adapters-worker",

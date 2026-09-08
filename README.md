@@ -31,7 +31,7 @@ workengine park --work <id>
 
 `--data-dir` (or `WORKENGINE_DATA_DIR`) selects the SQLite store and workspace directories. Default: `.workengine`.
 
-`start` is the happy path: bind a workspace, spawn the stub Worker, wait, and apply `complete`. `complete --file` is recovery. The CLI does not ask a model which Work or which next status to take.
+`start` is the happy path: bind a workspace, spawn the stub Worker, wait, and apply `complete`. `complete --file` recovers leftover `running` or `parked` Work from an outcome artifact (including after `next` auto-parked a crash). The CLI does not ask a model which Work or which next status to take.
 
 Crate layers: `workengine-domain` through `workengine-cli`. Run `just check` as in [CONTRIBUTING.md](CONTRIBUTING.md).
 
