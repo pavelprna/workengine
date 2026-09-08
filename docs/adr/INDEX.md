@@ -3,6 +3,7 @@
 | Number | Title | Status |
 | --- | --- | --- |
 | [0000](0000-record-architecture-decisions.md) | Record architecture decisions | Accepted |
+| [0001](0001-rust-workspace-hexagonal.md) | Rust workspace as hexagonal layers | Accepted |
 
 Status values: Proposed, Accepted, Superseded, Deprecated.
 
