@@ -15,7 +15,7 @@ This document is the canonical behaviour of Worker. Keywords follow [RFC 2119](h
 - **[TESTED]** A Worker MUST run as an isolated operating-system process (or a containment boundary that still appears as a process to the runner).
 - **[ENFORCED]** Workengine MUST NOT use an in-process agent host (chat session, IDE task, cloud agent API that owns the loop) as the Worker.
 - **[TESTED]** The runner MUST place the Worker in its own process group.
-- **[TESTED]** On timeout, hang, or abort, the runner MUST signal the process group (terminate, then kill), not only the parent PID.
+- **[TESTED]** On timeout, hang, or abort, the runner MUST signal the process group (terminate, then kill), not only the parent PID. First-slice process-group teardown is Unix.
 - **[ENFORCED]** The core MUST remain synchronous: spawn, wait, record. The domain and application crates MUST NOT depend on an async runtime.
 
 ## Contract
@@ -30,7 +30,7 @@ This document is the canonical behaviour of Worker. Keywords follow [RFC 2119](h
 
 - **[TESTED]** Each Worker run MUST have a hard budget (time, and later tokens or other meters the profile declares).
 - **[TESTED]** Accounting of spend and remaining budget MUST be Workengine's duty, not the Worker's.
-- **[TESTED]** Workengine MUST detect a hung Worker independently of the Worker process (watchdog outside the child).
+- **[TESTED]** Workengine MUST detect a hung Worker independently of the Worker process (watchdog outside the child). First-slice hang detection is that wall-clock deadline; `timed_out` and `budget_exceeded` remain distinct outcome kinds assigned by the runner. A silence watchdog (no output before the budget) is a later adapter concern.
 - **[UNTESTED]** Channel errors toward a model MUST be classified by the reaction Workengine will take (retry, fail, park), not by parsing prose.
 
 ## Isolation and safety
