@@ -1,60 +1,143 @@
 # Workengine
 
-Control plane for coding agents: a Work runtime whose steps are CLI agents. Code owns the outer loop; trackers and harnesses are adapters.
+A durable runtime for coding agents.
 
-Workengine is not an agent, not an LLM supervisor, and not a tracker client. It is the only writer of Work status and the only component that starts a Worker or publishes external effects.
+You give Workengine a goal. It starts a **Worker** — a real OS process, with a
+budget and a private workspace — and records a typed outcome. Status lives
+here, not on a board and not in a chat.
 
-## Domain
+The outer loop is code. The agent is a child process, not this session.
 
-The core knows four nouns. Everything else is an adapter.
+## Why it exists
 
-| Entity | Role |
+Coding agents already know how to edit files. What they usually lack is a
+control plane: something that owns the lifecycle, survives a crash, and does
+not ask the model which phase comes next.
+
+A tracker column is a lagging copy. An IDE chat is not a runtime. Workengine
+sits in between. **Work** is the unit of durable execution, and Workengine is
+the only writer of its status.
+
+## Try it
+
+Rust is pinned in `rust-toolchain.toml`. With [rustup](https://rustup.rs/)
+installed, the right toolchain is picked up for you.
+
+```bash
+cargo build --release
+./target/release/workengine version
+```
+
+Create a Work, then run the built-in stub Worker:
+
+```bash
+./target/release/workengine create --goal "say hello"
+# → <id> ready
+
+./target/release/workengine start --work <id>
+# → <id> succeeded
+```
+
+The stub writes a valid outcome and exits. It is a real Worker, not a test
+double: enough to walk the happy path before you plug in an agent CLI.
+
+`workengine --help` lists every command.
+
+## How it works
+
+Four nouns. Everything else is an adapter.
+
+| Noun | Role |
 | --- | --- |
-| **Work** | Unit of durable execution: stable id, closed statuses (`ready`, `running`, `succeeded`, `failed`, `parked`), first-slice attributes (goal, Worker profile) |
-| **Worker** | Agent as a process: versioned outcome, closed kind, budget and hang detected outside the child |
-| **Workspace** | Isolated copy for the life of one Work; containment; append-only memory after a confirmed outcome |
-| **Workflow** | Finite state machine, single writer, idempotent operations, resume, publish by the system |
+| **Work** | A durable job: stable id, a goal, a Worker profile, and a status |
+| **Worker** | An agent as a process. Workengine spawns it, watches the budget, and reads the outcome |
+| **Workspace** | A private copy for the life of one Work. Memory is append-only, and only after a confirmed outcome |
+| **Workflow** | The state machine. Transitions are code. Resume is idempotent. One writer |
 
-If domain code branches on an agent or tracker product name, the layer is wrong.
+A Work is `ready`, `running`, `succeeded`, `failed`, or `parked`.
 
-## CLI
+A typical run looks like this:
 
-The binary name is `workengine`. `workengine --help` and `workengine version` exist. The first runtime slice:
+1. `create` saves the Work as `ready`. Nothing is spawned yet.
+2. `next` prints the next startable id.
+3. `start` binds a workspace, writes the goal, optionally copies a checkout,
+   runs the Worker, and completes.
+4. If a run is left `running` or `parked`, `complete --file` or `park` recover
+   it — including after `next` auto-parked a crash.
 
+Workengine never asks a model which Work to take, or which status comes next.
+Agent and tracker names stay in configuration and adapters, not in the core.
+
+## Commands
+
+| Command | What it does |
+| --- | --- |
+| `create --goal "<text>" [--profile stub]` | Persist a new Work as `ready` |
+| `next` | Print the next startable Work id |
+| `start --work <id> [--checkout <dir>]` | Bind a workspace, run the Worker, complete |
+| `complete --work <id> --file outcome.json` | Apply an outcome to leftover `running` or `parked` Work |
+| `park --work <id>` | Park leftover `running` Work |
+| `version` | Print `workengine <semver>` |
+
+`--data-dir` (or `WORKENGINE_DATA_DIR`) chooses the SQLite store and workspace
+directories. Default: `.workengine`.
+
+`--config` (or `WORKENGINE_CONFIG`) is a TOML file of Worker profiles.
+
+## Worker profiles
+
+The default profile is `stub`. Any other name is configuration: the argv to
+spawn, env references, an optional checkout path. Point that argv at Cursor,
+Claude, Codex, or whatever CLI you already run — it is a profile file, not a
+vendor `if` in the core.
+
+```toml
+[profile.coder]
+argv = ["my-agent", "--print"]
+retry_limit = 2
+checkout = "/src"
+
+[profile.coder.env]
+API_TOKEN = { fromEnv = "API_TOKEN" }
 ```
-workengine create --goal "<text>" [--profile stub]
-workengine next
-workengine start --work <id> [--checkout <dir>]
-workengine complete --work <id> --file outcome.json
-workengine park --work <id>
-```
 
-`--data-dir` (or `WORKENGINE_DATA_DIR`) selects the SQLite store and workspace directories. Default: `.workengine`. `--config` (or `WORKENGINE_CONFIG`) is a TOML file of Worker profiles. Env values in that file are `{ fromEnv = "NAME" }` only.
-
-`start` is the happy path: bind a workspace, write the goal, optionally copy `--checkout`, spawn the Worker, wait, and apply `complete`. Default Worker is the stub (`--profile stub`). A TOML `--config` (or `WORKENGINE_CONFIG`) supplies argv and env references for any other profile name. `complete --file` recovers leftover `running` or `parked` Work from an outcome artifact (including after `next` auto-parked a crash). The CLI does not ask a model which Work or which next status to take.
-
-Crate layers: `workengine-domain` through `workengine-cli`. Run `just check` as in [CONTRIBUTING.md](CONTRIBUTING.md).
+Secrets are references (`fromEnv`), never inline values. A broken profile does
+not block Work that uses a different one.
 
 ## What this is not
 
-- A chat, skill, or IDE-hosted loop
-- An agent harness (that remains the inner loop of the spawned CLI)
-- A client of a board that treats columns as source of truth
-- A multi-agent swarm (Workers do not talk to each other; one writer per Work)
+Workengine is not an agent, not an LLM supervisor, and not a tracker client.
 
-## Documents
+- The Worker is a spawned process, not a chat, a skill, or an IDE-hosted loop.
+- The agent harness stays where it belongs: inside the CLI you spawn.
+- A board can show a copy. It is not the source of truth.
+- Workers do not talk to each other. One writer per Work — this is not a swarm.
 
-| Document | What it owns |
+## Status
+
+This is `0.0.0`. What you can do today is the CLI above: create, run,
+complete, park. Inbound adapters and publishers come later.
+
+Public contracts — command names, exit codes, schemas — live in
+[compatibility.md](docs/product/compatibility.md). Behaviour lives in
+[docs/spec](docs/spec/work.md). This README is the front door, not a second
+spec.
+
+## Learn more
+
+| If you want | Read |
 | --- | --- |
-| [docs/spec](docs/spec/work.md) | Behaviour (`MUST` / `MUST NOT`) |
-| [docs/architecture/overview.md](docs/architecture/overview.md) | Crates and dependency direction |
-| [docs/architecture/ports.md](docs/architecture/ports.md) | Port contracts |
-| [docs/architecture/fitness.md](docs/architecture/fitness.md) | What CI must be able to fail |
-| [docs/adr/INDEX.md](docs/adr/INDEX.md) | Why a shape was chosen |
-| [docs/product/compatibility.md](docs/product/compatibility.md) | SemVer, schemas, exit codes |
-| [docs/product/threat-model.md](docs/product/threat-model.md) | Threat model |
-| [AGENTS.md](AGENTS.md) | Entry for coding agents |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | Commits, rebase, how to check |
+| Behaviour (`MUST` / `MUST NOT`) | [docs/spec](docs/spec/work.md) |
+| Crates and dependency direction | [architecture overview](docs/architecture/overview.md) |
+| Port contracts | [ports.md](docs/architecture/ports.md) |
+| What CI must be able to fail | [fitness.md](docs/architecture/fitness.md) |
+| Why a shape was chosen | [ADRs](docs/adr/INDEX.md) |
+| SemVer, schemas, exit codes | [compatibility.md](docs/product/compatibility.md) |
+| Secrets, process kill, containment | [threat model](docs/product/threat-model.md) |
+| How to change this repo | [CONTRIBUTING.md](CONTRIBUTING.md) |
+| Entry for coding agents | [AGENTS.md](AGENTS.md) |
+
+Before you finish a change, run `just check`. That is what CI runs.
 
 ## License
 
