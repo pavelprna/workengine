@@ -38,13 +38,13 @@ Behaviour: [workspace.md](../spec/workspace.md) (unique root per `WorkId`, conta
 
 ## Clock
 
-Time and deadlines for budget and hang.
+Wall-clock timestamps for `create` (`unix_ms`). Hang and budget deadlines belong to the `WorkerRunner` adapter, not this trait.
 
 | First adapter | Next |
 | --- | --- |
-| System clock | Test fake |
+| `SystemClock` in application | Test fake (`FakeClock` in application tests) |
 
-Used by `WorkerRunner`. No separate spec.
+Used by `create`. No separate spec.
 
 ## Inbound (not first slice)
 

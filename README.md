@@ -10,7 +10,7 @@ The core knows four nouns. Everything else is an adapter.
 
 | Entity | Role |
 | --- | --- |
-| **Work** | Unit of durable execution: stable id, closed statuses (`ready`, `running`, `succeeded`, `failed`, `parked`), attributes, relations |
+| **Work** | Unit of durable execution: stable id, closed statuses (`ready`, `running`, `succeeded`, `failed`, `parked`), first-slice attributes (goal, Worker profile) |
 | **Worker** | Agent as a process: versioned outcome, closed kind, budget and hang detected outside the child |
 | **Workspace** | Isolated copy for the life of one Work; containment; append-only memory after a confirmed outcome |
 | **Workflow** | Finite state machine, single writer, idempotent operations, resume, publish by the system |
