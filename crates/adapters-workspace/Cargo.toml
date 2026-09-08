@@ -11,5 +11,8 @@ description = "Workengine WorkspaceFactory adapters."
 workengine-application.workspace = true
 workengine-domain.workspace = true
 
+[dev-dependencies]
+tempfile.workspace = true
+
 [lints]
 workspace = true

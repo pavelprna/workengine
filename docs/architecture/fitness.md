@@ -38,7 +38,7 @@ Enforced by the Cargo workspace as soon as crates exist. Clippy and `cargo deny`
 | ID | Invariant | Check | Status |
 | --- | --- | --- | --- |
 | F13 | Timeout kills the process group, not only the parent | worker adapter test | [UNTESTED] |
-| F14 | Two Work ids never share a workspace root | workspace test | [UNTESTED] |
+| F14 | Two Work ids never share a workspace root | workspace test | enforced |
 | F15 | Kill/restart mid-`complete` resumes; second `complete` is idempotent | durable-execution test on stub Worker | [UNTESTED] |
 
 ## Product contracts
@@ -62,7 +62,7 @@ These are not SemVer surfaces and not architecture. Canon for commits is `CONTRI
 | ID | Invariant | Check | Status |
 | --- | --- | --- | --- |
 | F20 | `park` is not abort: save point and free slot, without process-group kill as the park path | worker / application test | enforced |
-| F21 | Workspace has append-only memory; write only after a confirmed outcome | workspace test | [UNTESTED] |
+| F21 | Workspace has append-only memory; write only after a confirmed outcome | workspace test | enforced |
 | F22 | Supervised subprocess output uses one streaming format with `work_id` | CLI / runner tests | [UNTESTED] |
 
 ## How to add a check
