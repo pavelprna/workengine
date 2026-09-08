@@ -9,9 +9,11 @@ use serde::{Deserialize, Serialize};
 use workengine_application::{AppError, ChannelReaction, RunRequest, WorkerRunner};
 use workengine_domain::{OUTCOME_SCHEMA_VERSION, Outcome, OutcomeKind};
 
+mod process;
 mod stream;
 mod supervise;
 
+pub use process::ProcessWorkerRunner;
 pub use stream::{
     EVENT_CHILD_STDERR, EVENT_CHILD_STDOUT, EVENT_EXITED, EVENT_KILLED, EVENT_SPAWNED,
     STREAM_EVENTS, STREAM_SCHEMA_VERSION, record_line,
