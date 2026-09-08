@@ -32,6 +32,16 @@ pub fn start(
         work.bind_workspace(root.to_string_lossy().into_owned());
     }
 
+    if let Some(bytes) = artifact {
+        let outcome = runner.decode(&bytes)?;
+        if work.status() == WorkStatus::Ready {
+            let from = work.status();
+            work.start()?;
+            store.put(&work, WorkEvent::started(&work, from))?;
+        }
+        return complete(store, workspaces, id, &outcome);
+    }
+
     if work.status() != WorkStatus::Running {
         let from = work.status();
         work.start()?;
@@ -39,26 +49,16 @@ pub fn start(
     }
 
     let profile = work.attributes().worker_profile().to_owned();
-    let outcome = match artifact {
-        Some(bytes) => match runner.decode(&bytes) {
-            Ok(outcome) => outcome,
-            Err(err @ AppError::OutcomeSchema(_)) => {
-                persist_channel(store, workspaces, id, &profile)?;
-                return Err(err);
-            }
-            Err(err) => return Err(err),
-        },
-        None => match runner.run(&RunRequest {
-            work: &work,
-            workspace_root: &root,
-            budget,
-        }) {
-            Ok(outcome) => outcome,
-            Err(err) => {
-                persist_channel(store, workspaces, id, &profile)?;
-                return Err(err);
-            }
-        },
+    let outcome = match runner.run(&RunRequest {
+        work: &work,
+        workspace_root: &root,
+        budget,
+    }) {
+        Ok(outcome) => outcome,
+        Err(err @ AppError::OutcomeSchema(_)) => return Err(err),
+        Err(_) => {
+            return persist_channel(store, workspaces, id, &profile);
+        }
     };
 
     complete(store, workspaces, id, &outcome)

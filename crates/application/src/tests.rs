@@ -277,3 +277,103 @@ fn next_skips_succeeded() {
     start(&mut store, &ws, &runner, work.id(), BUDGET).unwrap();
     assert_eq!(next(&store).unwrap(), None);
 }
+
+#[test]
+fn start_on_parked_with_artifact_does_not_spawn_or_start_again() {
+    let mut store = FakeStore::default();
+    let work = ready_work(&mut store, &FakeClock { unix_ms: 1 });
+    let mut running = store.get(work.id()).unwrap().unwrap();
+    running.start().unwrap();
+    store
+        .put(
+            &running,
+            workengine_domain::WorkEvent::started(&running, WorkStatus::Ready),
+        )
+        .unwrap();
+    park(&mut store, work.id()).unwrap();
+    let mut ws = FakeWorkspace::default();
+    ws.artifacts
+        .insert(work.id().as_str().to_owned(), b"succeeded".to_vec());
+    let runner = FakeRunner::new(OutcomeKind::Failed);
+    let done = start(&mut store, &ws, &runner, work.id(), BUDGET).unwrap();
+    assert_eq!(done.status(), WorkStatus::Succeeded);
+    assert_eq!(runner.runs.get(), 0);
+    let kinds: Vec<_> = store
+        .events(work.id())
+        .unwrap()
+        .iter()
+        .map(|e| e.kind())
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![
+            workengine_domain::EventKind::Created,
+            workengine_domain::EventKind::Started,
+            workengine_domain::EventKind::Parked,
+            workengine_domain::EventKind::Completed,
+        ]
+    );
+}
+
+#[test]
+fn complete_after_recover_applies_to_parked() {
+    let mut store = FakeStore::default();
+    let ws = FakeWorkspace::default();
+    let work = ready_work(&mut store, &FakeClock { unix_ms: 1 });
+    let mut running = store.get(work.id()).unwrap().unwrap();
+    running.start().unwrap();
+    store
+        .put(
+            &running,
+            workengine_domain::WorkEvent::started(&running, WorkStatus::Ready),
+        )
+        .unwrap();
+    recover_unconfirmed(&mut store).unwrap();
+    assert_eq!(
+        store.get(work.id()).unwrap().unwrap().status(),
+        WorkStatus::Parked
+    );
+    let outcome = Outcome::new(OUTCOME_SCHEMA_VERSION, OutcomeKind::Succeeded, "stub").unwrap();
+    let done = complete(&mut store, &ws, work.id(), &outcome).unwrap();
+    assert_eq!(done.status(), WorkStatus::Succeeded);
+}
+
+#[test]
+fn bad_artifact_is_schema_error_and_does_not_complete() {
+    let mut store = FakeStore::default();
+    let work = ready_work(&mut store, &FakeClock { unix_ms: 1 });
+    let mut ws = FakeWorkspace::default();
+    ws.artifacts
+        .insert(work.id().as_str().to_owned(), b"not-json".to_vec());
+    let runner = FakeRunner::new(OutcomeKind::Succeeded);
+    let err = start(&mut store, &ws, &runner, work.id(), BUDGET).unwrap_err();
+    assert!(matches!(err, AppError::OutcomeSchema(_)));
+    assert_eq!(
+        store.get(work.id()).unwrap().unwrap().status(),
+        WorkStatus::Ready
+    );
+    assert_eq!(runner.runs.get(), 0);
+}
+
+struct BoomRunner;
+
+impl WorkerRunner for BoomRunner {
+    fn run(&self, _request: &RunRequest<'_>) -> Result<Outcome, AppError> {
+        Err(AppError::worker("spawn failed"))
+    }
+
+    fn decode(&self, _bytes: &[u8]) -> Result<Outcome, AppError> {
+        Err(AppError::worker("unused"))
+    }
+}
+
+#[test]
+fn runner_error_completes_as_channel_error_without_returning_err() {
+    let mut store = FakeStore::default();
+    let ws = FakeWorkspace::default();
+    let work = ready_work(&mut store, &FakeClock { unix_ms: 1 });
+    let done = start(&mut store, &ws, &BoomRunner, work.id(), BUDGET).unwrap();
+    assert_eq!(done.status(), WorkStatus::Failed);
+    let last = store.events(work.id()).unwrap().pop().unwrap();
+    assert_eq!(last.outcome_kind(), Some(OutcomeKind::ChannelError));
+}

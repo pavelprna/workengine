@@ -76,7 +76,7 @@ One use case per module, named after the CLI verb:
 - `complete`
 - `park`
 
-`start` binds a workspace, spawns through `WorkerRunner`, waits, and applies `complete`. CLI `complete --file` is the recovery path, not a second happy path.
+`start` binds a workspace, spawns through `WorkerRunner`, waits, and applies `complete`. If an outcome artifact already exists (leftover `running` or `parked`), `start` applies `complete` and MUST NOT spawn. CLI `complete --file` is the recovery path for leftover `running` or `parked` Work; it does not park first.
 
 Later: `capture`. Not a god-object orchestrator.
 
