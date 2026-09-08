@@ -4,6 +4,8 @@ Ports are traits in `workengine-application`. Adapters implement them. The first
 
 Trait signatures below are intent, not frozen Rust. The crate is the API. Behaviour (`MUST` / `MUST NOT`) lives in `docs/spec/`. This file maps each port to adapters.
 
+`WorkspaceFactory::bind` takes a `BindRequest` (goal text, optional checkout). `start` takes a `StartRequest` (budget, retry limit snapshotted for the call, optional checkout).
+
 ## WorkStore
 
 Persists current Work status and the append-only event log.
@@ -20,7 +22,7 @@ Spawns a Worker process, waits, enforces budget and hang detection, returns a ty
 
 | First adapter | Next |
 | --- | --- |
-| Stub that writes a schema-valid outcome and exits | A real CLI agent behind the same trait |
+| Stub that writes a schema-valid outcome and exits; generic process from a profile (argv + env refs) | A named vendor CLI still behind the same trait |
 
 Behaviour: [worker.md](../spec/worker.md) (process group, budget and hang outside the child, closed outcome).
 
@@ -28,11 +30,11 @@ Even the stub is part of the product: the core must run without an LLM.
 
 ## WorkspaceFactory
 
-Creates and addresses the isolated directory for a Work. `record_memory` takes domain status and outcome kind; the adapter encodes the JSON line.
+Creates and addresses the isolated directory for a Work. `record_memory` takes domain status and outcome kind; the adapter encodes the JSON line. `bind` writes the goal as data and, on first bind, may copy an operator checkout into that unique root.
 
 | First adapter | Next |
 | --- | --- |
-| Dedicated directory for the life of the Work | git worktree, then a container |
+| Dedicated directory for the life of the Work; optional copy of a checkout | git worktree, then a container |
 
 Behaviour: [workspace.md](../spec/workspace.md) (unique root per `WorkId`, containment).
 
@@ -76,7 +78,7 @@ One use case per module, named after the CLI verb:
 - `complete`
 - `park`
 
-`start` binds a workspace, spawns through `WorkerRunner`, waits, and applies `complete`. If an outcome artifact already exists (leftover `running` or `parked`), `start` applies `complete` and MUST NOT spawn. CLI `complete --file` is the recovery path for leftover `running` or `parked` Work; it does not park first.
+`start` binds a workspace, writes the goal, optionally copies a checkout, spawns through `WorkerRunner`, waits, and applies `complete`. Channel errors are classified by reaction: fail completes as `channel_error`; park calls `park` on the same Work; retry re-spawns inside that `start` up to the snapshotted limit, then fail. If an outcome artifact already exists (leftover `running` or `parked`), `start` applies `complete` and MUST NOT spawn. CLI `complete --file` is the recovery path for leftover `running` or `parked` Work; it does not park first.
 
 Later: `capture`. Not a god-object orchestrator.
 

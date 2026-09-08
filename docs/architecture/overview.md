@@ -26,7 +26,7 @@ Workengine is a hexagonal control plane. Layers are Cargo crates. A forbidden de
   outcomes, errors)                    store | worker | workspace
          ^                                        |
          |                                        v
-         |                              SQLite / stub process /
+         |                              SQLite / stub or process /
          |                              workspace directory
          +----------------------------------------+
 ```
@@ -40,7 +40,7 @@ Inbound and Publisher are ports. They are not part of the first vertical slice. 
 | `crates/domain` | `workengine-domain` | Entities, value objects, FSM, closed outcomes, domain errors. No I/O. |
 | `crates/application` | `workengine-application` | Use cases and port traits. Depends only on `workengine-domain`. |
 | `crates/adapters-store` | `workengine-adapters-store` | `WorkStore` implementations. |
-| `crates/adapters-worker` | `workengine-adapters-worker` | `WorkerRunner` implementations. |
+| `crates/adapters-worker` | `workengine-adapters-worker` | `WorkerRunner` implementations (stub and generic process). |
 | `crates/adapters-workspace` | `workengine-adapters-workspace` | `WorkspaceFactory` implementations. |
 | `crates/cli` | `workengine-cli` (bin `workengine`) | Composition root. |
 
