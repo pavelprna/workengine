@@ -1,0 +1,21 @@
+* text=auto eol=lf
+
+*.rs text
+*.toml text
+*.md text
+*.yml text
+*.yaml text
+*.json text
+*.jsonl text
+
+LICENSE text
+.editorconfig text
+.gitattributes text
+.gitignore text
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary

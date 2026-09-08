@@ -1,0 +1,24 @@
+# Cargo
+debug/
+target/
+**/*.rs.bk
+*.pdb
+**/mutants.out*/
+rustc-ice-*.txt
+
+# Keep Cargo.lock: this repository ships a binary, not a library.
+
+# Editors and local tooling
+.idea/
+.vscode/
+.cursor/
+*.swp
+*~
+.DS_Store
+
+# Local env and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
