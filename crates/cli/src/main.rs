@@ -2,16 +2,12 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use anyhow::Context;
 use clap::{Parser, Subcommand};
 use workengine_adapters_store::SqliteStore;
-use workengine_adapters_worker::{
-    ProcessWorkerRunner, StubBehavior, StubWorkerRunner, decode_outcome,
-};
+use workengine_adapters_worker::{ProcessWorkerRunner, StubBehavior, StubWorkerRunner};
 use workengine_adapters_workspace::DirWorkspaceFactory;
 use workengine_application::{
-    AppError, StartRequest, SystemClock, WorkStore, complete, create, next, park,
-    recover_unconfirmed, start,
+    AppError, StartRequest, SystemClock, WorkStore, create, next, park, recover_unconfirmed, start,
 };
 use workengine_domain::{DomainError, OutcomeKind, WorkId, WorkStatus};
 
@@ -32,8 +28,11 @@ struct Cli {
     #[arg(long, env = "WORKENGINE_DATA_DIR")]
     data_dir: Option<PathBuf>,
     /// Worker profile file (TOML). Validated lazily for the Work's profile.
-    #[arg(long, env = "WORKENGINE_CONFIG")]
+    #[arg(long, env = "WORKENGINE_CONFIG", conflicts_with = "config_dir")]
     config: Option<PathBuf>,
+    /// Directory with one `<profile>.toml` file per Worker profile.
+    #[arg(long, env = "WORKENGINE_CONFIG_DIR", conflicts_with = "config")]
+    config_dir: Option<PathBuf>,
     /// Hidden first-slice knobs for the stub Worker. Not a public contract.
     #[arg(
         long,
@@ -67,6 +66,25 @@ enum Command {
     },
     /// Print the next startable Work id
     Next,
+    /// List Work snapshots
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one Work snapshot
+    Show {
+        #[arg(long)]
+        work: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read append-only events as JSONL. Resume with `--after-seq`.
+    Events {
+        #[arg(long, default_value_t = 0)]
+        after_seq: u64,
+        #[arg(long)]
+        work: Option<String>,
+    },
     /// Bind a workspace, run a Worker, and complete
     Start {
         #[arg(long)]
@@ -74,13 +92,6 @@ enum Command {
         /// Copy this directory into the workspace on first bind
         #[arg(long)]
         checkout: Option<PathBuf>,
-    },
-    /// Apply an outcome file to leftover running or parked Work
-    Complete {
-        #[arg(long)]
-        work: String,
-        #[arg(long)]
-        file: PathBuf,
     },
     /// Park leftover running Work
     Park {
@@ -124,6 +135,38 @@ fn run() -> anyhow::Result<u8> {
             }
             Ok(0)
         }
+        Command::List { json } => {
+            let store = open_store(&data_dir, true)?;
+            let works = store.list()?;
+            for work in works {
+                if json {
+                    println!("{}", serde_json::to_string(&work_json(&store, &work))?);
+                } else {
+                    println!("{} {}", work.id(), work.status());
+                }
+            }
+            Ok(0)
+        }
+        Command::Show { work, json } => {
+            let store = open_store(&data_dir, true)?;
+            let id = WorkId::parse(work)?;
+            let work = store.get(&id)?.ok_or(AppError::NotFound(id))?;
+            if json {
+                println!("{}", serde_json::to_string(&work_json(&store, &work))?);
+            } else {
+                println!("{} {}", work.id(), work.status());
+            }
+            Ok(0)
+        }
+        Command::Events { after_seq, work } => {
+            let store = open_store(&data_dir, true)?;
+            let id = work.map(WorkId::parse).transpose()?;
+            for mut event in store.events_after(after_seq, id.as_ref())? {
+                event.payload["seq"] = serde_json::json!(event.seq);
+                println!("{}", serde_json::to_string(&event.payload)?);
+            }
+            Ok(0)
+        }
         Command::Start { work, checkout } => {
             let mut store = open_store(&data_dir, true)?;
             let workspaces = DirWorkspaceFactory::new(&data_dir);
@@ -136,6 +179,7 @@ fn run() -> anyhow::Result<u8> {
                 .to_owned();
             let selected = select_runner(
                 cli.config.as_deref(),
+                cli.config_dir.as_deref(),
                 &cli.stub_behavior,
                 cli.retry_limit,
                 &profile_name,
@@ -159,16 +203,6 @@ fn run() -> anyhow::Result<u8> {
             )?;
             println!("{} {}", work.id(), work.status());
             Ok(exit_for_status(work.status(), outcome_kind(&store, &id)?))
-        }
-        Command::Complete { work, file } => {
-            let mut store = open_store(&data_dir, false)?;
-            let workspaces = DirWorkspaceFactory::new(&data_dir);
-            let bytes = std::fs::read(&file).with_context(|| format!("read {}", file.display()))?;
-            let outcome = decode_outcome(&bytes).map_err(anyhow::Error::from)?;
-            let id = WorkId::parse(work)?;
-            let done = complete(&mut store, &workspaces, &SystemClock, &id, &outcome)?;
-            println!("{} {}", done.id(), done.status());
-            Ok(exit_for_status(done.status(), Some(outcome.kind())))
         }
         Command::Park { work } => {
             let mut store = open_store(&data_dir, true)?;
@@ -219,17 +253,25 @@ fn config_has_profile(table: &toml::Table, name: &str) -> bool {
 
 fn select_runner(
     config: Option<&std::path::Path>,
+    config_dir: Option<&std::path::Path>,
     stub_behavior: &str,
     retry_limit: Option<u32>,
     profile_name: &str,
     checkout: Option<PathBuf>,
 ) -> anyhow::Result<SelectedRunner> {
-    if let Some(path) = config {
-        let table = profile::load_table(path)?;
+    if let Some(path) = config.or(config_dir) {
+        let table = match config_dir {
+            Some(dir) => profile::load_profile_from_dir(dir, profile_name)?,
+            None => profile::load_table(path)?,
+        };
         let listed = config_has_profile(&table, profile_name);
         match profile::resolve_profile(&table, profile_name, |key| std::env::var(key).ok()) {
             Ok(resolved) => {
-                let runner = ProcessWorkerRunner::new(resolved.argv, resolved.env)?;
+                let runner = ProcessWorkerRunner::new(
+                    resolved.argv,
+                    resolved.secret_files,
+                    resolved.sandbox,
+                )?;
                 return Ok(SelectedRunner {
                     runner: AnyRunner::Process(runner),
                     retry_limit: retry_limit.unwrap_or(resolved.retry_limit),
@@ -240,7 +282,7 @@ fn select_runner(
             Err(err) => return Err(err),
         }
     } else if profile_name != "stub" {
-        anyhow::bail!("profile {profile_name} needs --config with argv");
+        anyhow::bail!("profile {profile_name} needs --config-dir with a profile file");
     }
 
     let behavior: StubBehavior = stub_behavior
@@ -282,6 +324,26 @@ fn open_store(data_dir: &std::path::Path, recover: bool) -> anyhow::Result<Sqlit
 
 fn outcome_kind(store: &SqliteStore, id: &WorkId) -> Result<Option<OutcomeKind>, AppError> {
     Ok(store.events(id)?.last().and_then(|e| e.outcome_kind()))
+}
+
+fn work_json(store: &SqliteStore, work: &workengine_domain::Work) -> serde_json::Value {
+    let outcome = store
+        .events(work.id())
+        .ok()
+        .and_then(|events| events.last().and_then(|event| event.outcome_kind()))
+        .map(|kind| kind.as_str());
+    serde_json::json!({
+        "workId": work.id().as_str(),
+        "status": work.status().as_str(),
+        "goal": work.attributes().goal(),
+        "workerProfile": work.attributes().worker_profile(),
+        "workspaceRoot": work.workspace_root(),
+        "createdAtUnixMs": work.created_at_unix_ms(),
+        "outcomeKind": outcome,
+        "activeExecution": null,
+        "activeAttempt": null,
+        "checkpoint": null,
+    })
 }
 
 fn exit_for_status(status: WorkStatus, kind: Option<OutcomeKind>) -> u8 {

@@ -16,6 +16,26 @@ pub fn complete(
     let mut work = store
         .get(id)?
         .ok_or_else(|| AppError::NotFound(id.clone()))?;
+    if outcome.worker_profile() != work.attributes().worker_profile() {
+        return Err(AppError::outcome_schema(format!(
+            "outcome profile {} does not match Work profile {}",
+            outcome.worker_profile(),
+            work.attributes().worker_profile()
+        )));
+    }
+    if matches!(
+        work.status(),
+        workengine_domain::WorkStatus::Succeeded | workengine_domain::WorkStatus::Failed
+    ) && store
+        .events(id)?
+        .last()
+        .and_then(|event| event.outcome_kind())
+        .is_some_and(|kind| kind != outcome.kind())
+    {
+        return Err(AppError::Conflict(format!(
+            "terminal outcome for {id} differs from the recorded outcome"
+        )));
+    }
     let from = work.status();
     match work.complete(outcome)? {
         Apply::Idempotent { status } => {

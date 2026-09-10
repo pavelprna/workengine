@@ -10,7 +10,7 @@ use crate::ports::{
     BindRequest, RunRequest, StartRequest, WorkStore, WorkerRunner, WorkspaceFactory,
 };
 
-/// Bind a workspace, spawn unless an outcome artifact already exists, then complete.
+/// Bind a workspace, spawn a Worker, then complete from its returned outcome.
 pub fn start(
     store: &mut impl WorkStore,
     workspaces: &impl WorkspaceFactory,
@@ -23,11 +23,10 @@ pub fn start(
         .get(id)?
         .ok_or_else(|| AppError::NotFound(id.clone()))?;
     let artifact = workspaces.read_artifact(id)?;
-    if let Some(bytes) = &artifact
-        && matches!(work.status(), WorkStatus::Succeeded | WorkStatus::Failed)
-    {
-        let outcome = runner.decode(bytes)?;
-        return complete(store, workspaces, clock, id, &outcome);
+    if artifact.is_some() {
+        return Err(AppError::outcome_schema(
+            "shared workspace outcome artifacts are unsupported; a protected attempt artifact is required",
+        ));
     }
 
     let root = workspaces.bind(&BindRequest {
@@ -36,22 +35,12 @@ pub fn start(
         checkout: request.checkout,
     })?;
     work.bind_workspace(root.to_string_lossy().into_owned())?;
-    if work.status() == WorkStatus::Running && artifact.is_none() {
+    if work.status() == WorkStatus::Running {
         park(store, clock, id)?;
         work = store
             .get(id)?
             .ok_or_else(|| AppError::NotFound(id.clone()))?;
         work.bind_workspace(root.to_string_lossy().into_owned())?;
-    }
-
-    if let Some(bytes) = artifact {
-        let outcome = runner.decode(&bytes)?;
-        if work.status() == WorkStatus::Ready {
-            let from = work.status();
-            work.start()?;
-            store.put(&work, WorkEvent::started(&work, from, clock.unix_ms()))?;
-        }
-        return complete(store, workspaces, clock, id, &outcome);
     }
 
     if work.status() != WorkStatus::Running {

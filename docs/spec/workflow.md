@@ -28,7 +28,8 @@ First-slice transitions. Status names are defined in [work.md](work.md). Workeng
 
 ## Operations
 
-The first CLI slice exposes `create`, `next`, `start`, `complete`, and `park`. Their rules:
+The current CLI slice exposes `create`, `next`, `start`, and `park`. `complete`
+is an internal control-plane operation, not a user command. Their rules:
 
 - **[TESTED]** `create` MUST persist a new Work as `ready` with a `Created` event, atomically, and MUST NOT spawn a Worker.
 - **[TESTED]** `next` MUST select Work according to the store and the FSM, not by asking a model which item or phase to take.
@@ -36,12 +37,12 @@ The first CLI slice exposes `create`, `next`, `start`, `complete`, and `park`. T
 - **[TESTED]** `start` MUST bind a Workspace and spawn a Worker only when the Work is `ready` or `parked` and the FSM allows it. The Work then becomes `running`. The goal is written into the workspace as data. Channel retry re-spawns inside this invocation; the retry limit is snapshotted. Channel park uses `park`, not `complete`.
 - **[TESTED]** After the Worker process exits with a closed outcome, `start` MUST apply `complete`. The CLI happy path is one `start` invocation: spawn, wait, record.
 - **[TESTED]** `complete` MUST apply a closed outcome and persist status plus event atomically, following the table above.
-- **[TESTED]** `complete` as a CLI verb (`complete --file`) MUST exist for recovery: leftover `running` or `parked` Work, outcome artifact already written, control plane restarting before the status was committed.
-- **[TESTED]** If a workspace already contains a confirmed-looking outcome artifact after a leftover `running` Work was parked, `start` MUST apply `complete` from that artifact and MUST NOT spawn a second Worker. It MUST NOT append a second `Started` event.
-- **[TESTED]** Repeating `next`, `complete`, or `park` on the same Work MUST NOT duplicate effects: no second spawn, no second status transition, no second event. Repeating `start` MUST NOT spawn twice: a leftover artifact completes without spawn (idempotent if already terminal); `start` on already-`running` or terminal Work without an artifact is an illegal transition.
+- **[TESTED]** A CLI `complete --file` command MUST NOT exist: a user-provided or workspace-shared outcome has no provenance and cannot recover Work.
+- **[TESTED]** If a workspace contains an outcome artifact, `start` MUST reject it. Attempt-scoped protected recovery artifacts are specified by ADR 0005 and remain pending.
+- **[TESTED]** Repeating `next`, internal `complete`, or `park` on the same Work MUST NOT duplicate effects. `start` on already-`running` or terminal Work is an illegal transition.
 - **[TESTED]** `park` MUST pause without losing progress: reach a save point, leave the Worker slot, and leave the Work `parked`.
-- **[TESTED]** First-slice CLI is a single writer and is not a daemon. `park` MUST NOT require a second Workengine process signalling a Worker that `start` is still waiting on. Concurrent pause of an in-flight wait is not this slice.
-- **[TESTED]** The first-slice CLI MUST hold an exclusive lock on the data directory for the life of the process. A second invocation on the same data directory MUST fail as a store conflict. It MUST NOT park or complete Work that another process is running. Process-group teardown and this lock are Unix in this slice.
+- **[UNTESTED]** Live `park` uses a durable checkpoint request consumed by an active supervisor. The present foreground CLI exposes only the historical parked transition while this protocol is being completed.
+- **[TESTED]** SQLite runs in WAL mode without a global data-directory lock, so unrelated Work is not blocked. Per-Work capture/CAS is still required before concurrent `start` is claimed safe.
 - **[TESTED]** `park` MUST NOT be abort. Abort, timeout, and hang MUST terminate the process group without treating that path as a save-point pause. `park` MUST reach a save point; abort MUST NOT be required to.
 - **[TESTED]** Parked Work MUST NOT spin, poll, or occupy a Worker slot.
 - **[TESTED]** An answer to a park MUST continue the same Work. It MUST NOT create a new Work.
@@ -57,8 +58,7 @@ The first CLI slice exposes `create`, `next`, `start`, `complete`, and `park`. T
 - **[TESTED]** Between Worker runs, status MUST travel through persistent artifacts, not by continuing a model dialogue.
 - **[TESTED]** Every long-lived artifact MUST carry `schemaVersion`.
 - **[TESTED]** On Workengine restart, Work in an unconfirmed state MUST return to the queue automatically (resume from the failure point, not from the beginning of the Work).
-- **[TESTED]** First-slice unconfirmed state is Work whose status is `running` and that has no committed `Completed` event. The next CLI invocation other than `complete` MUST `park` that Work. The workspace directory is the save point. There is no `running` → `ready` transition.
-- **[TESTED]** `complete --file` MUST apply to leftover `running` or leftover `parked` Work and MUST NOT park it first.
+- **[TESTED]** An unconfirmed `running` Work is parked by recovery. There is no `running` → `ready` transition. A workspace directory is not a trusted checkpoint or outcome authority.
 
 ## Publication and observation
 
@@ -79,7 +79,7 @@ The first CLI slice exposes `create`, `next`, `start`, `complete`, and `park`. T
 ## Configuration
 
 - **[TESTED]** Secrets in configuration MUST be stored by reference, never as inline values.
-- **[TESTED]** Configuration MUST be validated lazily: a broken part MUST NOT block unrelated Work. First-slice lazy validation is per named Worker profile in the config file.
+- **[TESTED]** Configuration MUST be validated lazily: a broken part MUST NOT block unrelated Work. `--config-dir` loads only the selected `<profile>.toml`.
 - **[TESTED]** Changing configuration MUST NOT rewrite the rules of Work that is already in flight. First-slice retry limit and checkout are snapshotted at `start`.
 
 ## Capture and scale

@@ -39,12 +39,12 @@ Short model for a control plane that spawns processes, holds workspace copies, a
 | Worker writes Work status or publishes as if it were the system | Worker is a process; only Workengine writes the store and publish port |
 | Prompt injection from a ticket or webpage | Inbound text is data. Free text is never a control command |
 | Secret in config committed or logged | Secrets by reference only. Scrub before publish. No values in issues or logs |
-| Worker escapes the workspace | Containment: assigned root only; later a tighter sandbox behind the same port |
+| Worker escapes the workspace | User profiles select Bubblewrap or OCI; the runner mounts only the declared runtime and workspace, and fails closed without a backend |
 | Timeout kills parent, children remain | Process group terminate then kill (Unix in this slice) |
 | Tracker column treated as status | Internal store is SoT; boards are best-effort copies |
 | Workengine phones home | No default telemetry exporter |
 | Destructive host actions | Deny-by-default Worker profile; known-destructive actions forbidden |
-| Two machines double-start the same Work | Capture protocol (not first slice). First-slice Unix exclusive lock on the data directory so a second CLI fails closed |
+| Two machines double-start the same Work | Per-Work capture/CAS protocol is not yet implemented; this runtime does not claim multi-process `start` safety |
 
 ## Out of scope for this note
 

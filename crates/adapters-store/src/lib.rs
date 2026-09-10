@@ -13,7 +13,7 @@ use workengine_domain::{
 
 const WORK_SCHEMA_VERSION: u32 = 1;
 /// SQLite `user_version`. Distinct from per-row `schema_version` on Work.
-const STORE_USER_VERSION: i32 = 1;
+const STORE_USER_VERSION: i32 = 2;
 
 const MIGRATION_1: &str = "
 CREATE TABLE IF NOT EXISTS works (
@@ -27,9 +27,36 @@ CREATE TABLE IF NOT EXISTS works (
 );
 CREATE TABLE IF NOT EXISTS events (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
-    work_id TEXT NOT NULL,
+    work_id TEXT NOT NULL REFERENCES works(id),
     payload TEXT NOT NULL
 );
+";
+
+const MIGRATION_2: &str = "
+ALTER TABLE works ADD COLUMN generation INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE IF NOT EXISTS executions (
+    id TEXT PRIMARY KEY,
+    work_id TEXT NOT NULL REFERENCES works(id),
+    spec_digest TEXT NOT NULL,
+    created_at_unix_ms INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS attempts (
+    id TEXT PRIMARY KEY,
+    execution_id TEXT NOT NULL REFERENCES executions(id),
+    state TEXT NOT NULL,
+    created_at_unix_ms INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS control_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    work_id TEXT NOT NULL REFERENCES works(id),
+    kind TEXT NOT NULL,
+    state TEXT NOT NULL,
+    created_at_unix_ms INTEGER NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS events_are_append_only_update
+BEFORE UPDATE ON events BEGIN SELECT RAISE(ABORT, 'events are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS events_are_append_only_delete
+BEFORE DELETE ON events BEGIN SELECT RAISE(ABORT, 'events are append-only'); END;
 ";
 
 #[derive(Serialize, Deserialize)]
@@ -54,25 +81,28 @@ struct EventPayload {
 }
 
 pub struct SqliteStore {
-    // Lock is declared first so it is released after the SQLite connection.
-    #[cfg(unix)]
-    _lock: nix::fcntl::Flock<std::fs::File>,
     conn: Connection,
+}
+
+/// One immutable event with its cursor. The cursor is the SQLite journal
+/// sequence, so clients resume with `seq > cursor` without relying on clocks.
+pub struct EventRecord {
+    pub seq: u64,
+    pub payload: serde_json::Value,
 }
 
 impl SqliteStore {
     pub fn open(data_dir: impl AsRef<Path>) -> Result<Self, AppError> {
         let data_dir = data_dir.as_ref();
         std::fs::create_dir_all(data_dir).map_err(AppError::store)?;
-        #[cfg(unix)]
-        let lock = acquire_lock(data_dir)?;
-        let conn = Connection::open(data_dir.join("workengine.sqlite")).map_err(AppError::store)?;
+        restrict_directory(data_dir)?;
+        let database = data_dir.join("workengine.sqlite");
+        let conn = Connection::open(&database).map_err(AppError::store)?;
+        restrict_file(&database)?;
+        conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")
+            .map_err(AppError::store)?;
         migrate(&conn)?;
-        Ok(Self {
-            #[cfg(unix)]
-            _lock: lock,
-            conn,
-        })
+        Ok(Self { conn })
     }
 
     fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkRow> {
@@ -100,6 +130,38 @@ impl SqliteStore {
             row.workspace_root,
             row.created_at_unix_ms as u64,
         ))
+    }
+
+    pub fn events_after(
+        &self,
+        after_seq: u64,
+        work_id: Option<&WorkId>,
+    ) -> Result<Vec<EventRecord>, AppError> {
+        let sql = if work_id.is_some() {
+            "SELECT seq, payload FROM events WHERE seq > ?1 AND work_id = ?2 ORDER BY seq"
+        } else {
+            "SELECT seq, payload FROM events WHERE seq > ?1 ORDER BY seq"
+        };
+        let mut statement = self.conn.prepare(sql).map_err(AppError::store)?;
+        let mut rows = if let Some(id) = work_id {
+            statement
+                .query(params![after_seq as i64, id.as_str()])
+                .map_err(AppError::store)?
+        } else {
+            statement
+                .query(params![after_seq as i64])
+                .map_err(AppError::store)?
+        };
+        let mut records = Vec::new();
+        while let Some(row) = rows.next().map_err(AppError::store)? {
+            let seq: i64 = row.get(0).map_err(AppError::store)?;
+            let payload: String = row.get(1).map_err(AppError::store)?;
+            records.push(EventRecord {
+                seq: seq as u64,
+                payload: serde_json::from_str(&payload).map_err(AppError::outcome_schema)?,
+            });
+        }
+        Ok(records)
     }
 }
 
@@ -170,36 +232,48 @@ impl WorkStore for SqliteStore {
     }
 }
 
-#[cfg(unix)]
-fn acquire_lock(data_dir: &Path) -> Result<nix::fcntl::Flock<std::fs::File>, AppError> {
-    use std::fs::OpenOptions;
-
-    use nix::fcntl::{Flock, FlockArg};
-
-    let file = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(data_dir.join("lock"))
-        .map_err(AppError::store)?;
-    Flock::lock(file, FlockArg::LockExclusiveNonblock)
-        .map_err(|_| AppError::Conflict(format!("data directory in use: {}", data_dir.display())))
-}
-
 fn migrate(conn: &Connection) -> Result<(), AppError> {
     let current: i32 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(AppError::store)?;
-    if current > STORE_USER_VERSION {
+    if current == 1 || current > STORE_USER_VERSION {
         return Err(AppError::from(
             workengine_domain::DomainError::UnsupportedSchemaVersion(current as u32),
         ));
     }
-    if current < 1 {
+    if current == 0 {
         conn.execute_batch(MIGRATION_1).map_err(AppError::store)?;
-        conn.pragma_update(None, "user_version", 1)
+        conn.execute_batch(MIGRATION_2).map_err(AppError::store)?;
+        conn.pragma_update(None, "user_version", STORE_USER_VERSION)
             .map_err(AppError::store)?;
+    }
+    Ok(())
+}
+
+fn restrict_directory(path: &Path) -> Result<(), AppError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+            .map_err(AppError::store)?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+    Ok(())
+}
+
+fn restrict_file(path: &Path) -> Result<(), AppError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .map_err(AppError::store)?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
     }
     Ok(())
 }
@@ -372,7 +446,7 @@ mod tests {
     }
 
     #[test]
-    fn open_sets_store_user_version_one() {
+    fn open_sets_store_user_version_two() {
         let (store, _dir) = store();
         let version: i32 = store
             .conn
@@ -382,7 +456,7 @@ mod tests {
     }
 
     #[test]
-    fn reopen_of_v1_is_identity() {
+    fn reopen_of_v2_is_identity() {
         let dir = tempfile::tempdir().unwrap();
         let mut first = SqliteStore::open(dir.path()).unwrap();
         let work = sample();
@@ -395,11 +469,11 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 1);
+        assert_eq!(version, 2);
     }
 
     #[test]
-    fn v0_file_with_tables_migrates_to_v1() {
+    fn empty_v0_file_with_tables_initializes_to_v2() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("workengine.sqlite");
         let conn = Connection::open(&path).unwrap();
@@ -414,7 +488,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 1);
+        assert_eq!(version, 2);
     }
 
     #[test]
@@ -422,7 +496,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("workengine.sqlite");
         let conn = Connection::open(&path).unwrap();
-        conn.pragma_update(None, "user_version", 2).unwrap();
+        conn.pragma_update(None, "user_version", 3).unwrap();
         drop(conn);
         let err = match SqliteStore::open(dir.path()) {
             Ok(_) => panic!("expected unknown store version to fail"),
@@ -430,19 +504,45 @@ mod tests {
         };
         assert!(matches!(
             err,
-            AppError::Domain(workengine_domain::DomainError::UnsupportedSchemaVersion(2))
+            AppError::Domain(workengine_domain::DomainError::UnsupportedSchemaVersion(3))
         ));
     }
 
-    #[cfg(unix)]
     #[test]
-    fn second_open_of_the_same_data_dir_is_a_conflict() {
+    fn v1_store_is_rejected_without_deleting_data() {
         let dir = tempfile::tempdir().unwrap();
-        let _first = SqliteStore::open(dir.path()).unwrap();
+        let path = dir.path().join("workengine.sqlite");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(MIGRATION_1).unwrap();
+        conn.pragma_update(None, "user_version", 1).unwrap();
+        drop(conn);
         let err = match SqliteStore::open(dir.path()) {
-            Ok(_) => panic!("expected a second open of the same data dir to fail"),
+            Ok(_) => panic!("expected v1 store to fail"),
             Err(err) => err,
         };
-        assert!(matches!(err, AppError::Conflict(_)));
+        assert!(matches!(
+            err,
+            AppError::Domain(workengine_domain::DomainError::UnsupportedSchemaVersion(1))
+        ));
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn journal_is_append_only() {
+        let (mut store, _dir) = store();
+        let work = sample();
+        store.put(&work, WorkEvent::created(&work)).unwrap();
+        let err = store.conn.execute("DELETE FROM events", []).unwrap_err();
+        assert!(err.to_string().contains("append-only"));
+    }
+
+    #[test]
+    fn event_cursor_is_strictly_after_and_monotonic() {
+        let (mut store, _dir) = store();
+        let work = sample();
+        store.put(&work, WorkEvent::created(&work)).unwrap();
+        let all = store.events_after(0, Some(work.id())).unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(store.events_after(all[0].seq, None).unwrap().len(), 0);
     }
 }

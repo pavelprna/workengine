@@ -32,7 +32,7 @@ Enforced by the Cargo workspace as soon as crates exist. Clippy and `cargo deny`
 | --- | --- | --- | --- |
 | F11 | Status update and event append are atomic | store test | enforced |
 | F12 | Replay reconstructs status | store test | enforced |
-| F23 | Two CLI processes MUST NOT share a data directory: exclusive lock, second open is a store conflict | store test + CLI test (Unix) | enforced |
+| F23 | An independent `create` is not blocked by an unrelated running Work; SQLite uses WAL rather than a data-directory lock | CLI test (Unix) | enforced |
 
 ## Worker and workspace
 
@@ -40,7 +40,7 @@ Enforced by the Cargo workspace as soon as crates exist. Clippy and `cargo deny`
 | --- | --- | --- | --- |
 | F13 | Timeout kills the process group, not only the parent | worker adapter test | enforced |
 | F14 | Two Work ids never share a workspace root | workspace test | enforced |
-| F15 | Leftover `running` parks; `complete --file` applies to leftover `running` or `parked`; start with an outcome artifact does not spawn; second `complete` is idempotent | durable-execution test on stub Worker | enforced |
+| F15 | A legacy shared workspace outcome is rejected and cannot complete Work; leftover `running` parks on recovery | durable-execution test on stub Worker | enforced |
 
 ## Product contracts
 
@@ -65,7 +65,7 @@ These are not SemVer surfaces and not architecture. Canon for commits is `CONTRI
 | F20 | `park` is not abort: save point and free slot, without process-group kill as the park path | worker / application test | enforced |
 | F21 | Workspace has append-only memory; write only after a confirmed outcome; repeat complete does not duplicate the last line | workspace / application test | enforced |
 | F24 | Channel errors are classified as retry, fail, or park; fail completes as `channel_error`; park does not complete | application test | enforced |
-| F25 | Process Worker env is empty except declared references; missing `outcome.json` is `failed`, not exit-code success | worker adapter test | enforced |
+| F25 | Process Worker env is empty except secret-file paths; secret values are transient host `0600` files and missing outcome is `failed`, not exit-code success | worker adapter test | enforced |
 
 ## How to add a check
 

@@ -1,4 +1,3 @@
-use std::path::Path;
 use std::process::Command;
 
 fn bin() -> Command {
@@ -16,20 +15,7 @@ fn stream_records(stderr: &[u8]) -> Vec<serde_json::Value> {
         .collect()
 }
 
-fn mark_leftover_running(data_dir: &Path, id: &str) {
-    let conn = rusqlite::Connection::open(data_dir.join("workengine.sqlite")).unwrap();
-    conn.execute("UPDATE works SET status = 'running' WHERE id = ?1", [id])
-        .unwrap();
-    let ws = data_dir.join("workspaces").join(id);
-    std::fs::create_dir_all(&ws).unwrap();
-    std::fs::write(
-        ws.join("outcome.json"),
-        r#"{"schemaVersion":1,"kind":"succeeded","workerProfile":"stub"}"#,
-    )
-    .unwrap();
-}
-
-fn create_work(data_dir: &Path) -> String {
+fn create_work(data_dir: &std::path::Path) -> String {
     let output = bin()
         .args([
             "--data-dir",
@@ -104,7 +90,7 @@ fn create_next_start_succeeds() {
 }
 
 #[test]
-fn start_after_success_completes_from_leftover_artifact() {
+fn start_rejects_shared_artifact_left_by_a_prior_run() {
     let dir = tempfile::tempdir().unwrap();
     let id = create_work(dir.path());
     let first = bin()
@@ -128,115 +114,13 @@ fn start_after_success_completes_from_leftover_artifact() {
         ])
         .output()
         .unwrap();
-    assert!(
-        second.status.success(),
-        "second start should complete from leftover artifact: {}",
-        String::from_utf8_lossy(&second.stderr)
-    );
-    assert!(stdout(&second).ends_with(" succeeded"));
-}
-
-#[test]
-fn complete_file_is_idempotent() {
-    let dir = tempfile::tempdir().unwrap();
-    let id = create_work(dir.path());
-    let start = bin()
-        .args([
-            "--data-dir",
-            dir.path().to_str().unwrap(),
-            "start",
-            "--work",
-            &id,
-        ])
-        .output()
-        .unwrap();
-    assert!(start.status.success());
-    let outcome = dir.path().join("workspaces").join(&id).join("outcome.json");
-    let again = bin()
-        .args([
-            "--data-dir",
-            dir.path().to_str().unwrap(),
-            "complete",
-            "--work",
-            &id,
-            "--file",
-            outcome.to_str().unwrap(),
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        again.status.success(),
-        "complete failed: {}",
-        String::from_utf8_lossy(&again.stderr)
-    );
-    assert!(stdout(&again).ends_with(" succeeded"));
-    let memory =
-        std::fs::read_to_string(dir.path().join("workspaces").join(&id).join("memory.log"))
-            .unwrap();
-    assert_eq!(memory.lines().count(), 1);
-}
-
-#[test]
-fn unknown_outcome_kind_is_schema_exit() {
-    let dir = tempfile::tempdir().unwrap();
-    let id = create_work(dir.path());
-    let file = dir.path().join("bad.json");
-    std::fs::write(
-        &file,
-        r#"{"schemaVersion":1,"kind":"needs_review","workerProfile":"stub"}"#,
-    )
-    .unwrap();
-    let output = bin()
-        .args([
-            "--data-dir",
-            dir.path().to_str().unwrap(),
-            "complete",
-            "--work",
-            &id,
-            "--file",
-            file.to_str().unwrap(),
-        ])
-        .output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(30));
+    assert_eq!(second.status.code(), Some(30));
 }
 
 #[test]
 fn no_args_is_usage_error() {
     let output = bin().output().unwrap();
     assert_eq!(output.status.code(), Some(2));
-}
-
-#[test]
-fn complete_file_after_next_recovers_parked_leftover() {
-    let dir = tempfile::tempdir().unwrap();
-    let id = create_work(dir.path());
-    mark_leftover_running(dir.path(), &id);
-    let next = bin()
-        .args(["--data-dir", dir.path().to_str().unwrap(), "next"])
-        .output()
-        .unwrap();
-    assert!(next.status.success());
-    assert_eq!(stdout(&next), id);
-    let outcome = dir.path().join("workspaces").join(&id).join("outcome.json");
-    let again = bin()
-        .args([
-            "--data-dir",
-            dir.path().to_str().unwrap(),
-            "complete",
-            "--work",
-            &id,
-            "--file",
-            outcome.to_str().unwrap(),
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        again.status.success(),
-        "complete after recover failed: {}",
-        String::from_utf8_lossy(&again.stderr)
-    );
-    assert!(stdout(&again).ends_with(" succeeded"));
 }
 
 #[cfg(unix)]
@@ -336,7 +220,7 @@ fn start_emits_stream_records_with_work_id() {
 
 #[cfg(unix)]
 #[test]
-fn data_dir_lock_rejects_a_second_cli() {
+fn independent_create_is_not_blocked_by_a_running_work() {
     use std::io::{BufRead, BufReader};
     use std::process::Stdio;
     use std::time::{Duration, Instant};
@@ -369,10 +253,7 @@ fn data_dir_lock_rejects_a_second_cli() {
             break;
         }
     }
-    assert!(
-        saw_spawned,
-        "start never emitted spawned; it must hold the lock first"
-    );
+    assert!(saw_spawned, "start never emitted spawned");
     let output = bin()
         .args([
             "--data-dir",
@@ -385,10 +266,9 @@ fn data_dir_lock_rejects_a_second_cli() {
         .unwrap();
     let _ = child.kill();
     let _ = child.wait();
-    assert_eq!(
-        output.status.code(),
-        Some(11),
-        "second CLI stderr: {}",
+    assert!(
+        output.status.success(),
+        "independent create stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 }
@@ -418,7 +298,7 @@ fn channel_park_exits_parked() {
 
 #[cfg(unix)]
 #[test]
-fn process_profile_writes_goal_and_uses_outcome_file() {
+fn process_profile_without_sandbox_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("workengine.toml");
     std::fs::write(
@@ -463,25 +343,13 @@ argv = ["/bin/sh", "-c", "printf '%s\\n' '{\"schemaVersion\":1,\"kind\":\"succee
         ])
         .output()
         .unwrap();
-    assert!(
-        start.status.success(),
-        "start failed: {}",
-        String::from_utf8_lossy(&start.stderr)
-    );
-    assert!(stdout(&start).ends_with(" succeeded"));
-    let goal = std::fs::read_to_string(
-        dir.path()
-            .join("workspaces")
-            .join(&id)
-            .join("workengine-goal.txt"),
-    )
-    .unwrap();
-    assert_eq!(goal, "from-cli");
+    assert!(!start.status.success());
+    assert!(String::from_utf8_lossy(&start.stderr).contains("must declare a sandbox"));
 }
 
 #[cfg(unix)]
 #[test]
-fn process_without_outcome_fails_closed() {
+fn process_profile_without_sandbox_cannot_start() {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("workengine.toml");
     std::fs::write(
@@ -522,18 +390,13 @@ argv = ["/bin/true"]
         ])
         .output()
         .unwrap();
-    assert_eq!(
-        start.status.code(),
-        Some(1),
-        "stderr: {}",
-        String::from_utf8_lossy(&start.stderr)
-    );
-    assert!(stdout(&start).ends_with(" failed"));
+    assert_eq!(start.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&start.stderr).contains("must declare a sandbox"));
 }
 
 #[cfg(unix)]
 #[test]
-fn checkout_copy_and_lazy_profile_validation() {
+fn checkout_copy_requires_a_sandboxed_profile() {
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("src");
     std::fs::create_dir_all(&src).unwrap();
@@ -585,12 +448,6 @@ argv = ["/bin/sh", "-c", "printf '%s\\n' '{\"schemaVersion\":1,\"kind\":\"succee
         ])
         .output()
         .unwrap();
-    assert!(
-        start.status.success(),
-        "start failed: {}",
-        String::from_utf8_lossy(&start.stderr)
-    );
-    let copied =
-        std::fs::read_to_string(dir.path().join("workspaces").join(&id).join("hello.txt")).unwrap();
-    assert_eq!(copied, "copied");
+    assert!(!start.status.success());
+    assert!(String::from_utf8_lossy(&start.stderr).contains("must declare a sandbox"));
 }

@@ -12,12 +12,12 @@ These are public contracts. A breaking change is a major version, plus a migrati
 
 | Surface | Compatibility |
 | --- | --- |
-| CLI command names (`create`, `next`, `start`, `complete`, `park`, `version`) | Stable |
+| CLI command names (`create`, `next`, `start`, `park`, `version`) | Stable |
 | CLI `version` prefix | `workengine <semver>` where semver is `CARGO_PKG_VERSION` |
-| CLI flags and env vars documented in `--help` | Stable (`--config` / `WORKENGINE_CONFIG`, `start --checkout`) |
+| CLI flags and env vars documented in `--help` | Stable (`--config-dir` / `WORKENGINE_CONFIG_DIR`, `start --checkout`) |
 | Process exit codes | Stable; see table below |
 | Outcome JSON schema (`schemaVersion`) | Stable within a major; unknown fields must fail closed or be reserved |
-| Store artifact schema (`schemaVersion`) | Stable within a major; breaking change requires a migrator |
+| Store artifact schema (`schemaVersion`) | Store v2 rejects v1 directories without mutation; operators create a new data directory |
 | Workspace memory line schema (`schemaVersion`) | Stable within a major |
 | Supervised subprocess stream record (`schemaVersion`, camelCase) | Stable within a major; same JSON dialect as outcome and event |
 | Domain status and outcome enumerations that appear in those schemas (`ready`, `running`, `succeeded`, `failed`, `parked`; outcome kinds in [../spec/worker.md](../spec/worker.md)) | Stable |
@@ -58,6 +58,8 @@ Exact numbers freeze with this slice. Do not treat "non-zero" as a single failur
 - Readers MUST reject an unknown version rather than guess.
 - Additive optional fields MAY appear in a minor version if unknown fields on write are not silently dropped from the store.
 - Removing or reinterpreting a field is a major version.
+- SQLite `user_version=1` is intentionally unsupported by this v2 runtime and
+  is never migrated or deleted automatically.
 
 ## Related
 

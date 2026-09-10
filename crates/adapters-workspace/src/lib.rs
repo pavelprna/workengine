@@ -42,8 +42,16 @@ impl DirWorkspaceFactory {
 impl WorkspaceFactory for DirWorkspaceFactory {
     fn bind(&self, request: &BindRequest<'_>) -> Result<PathBuf, AppError> {
         let path = self.dir(request.work_id);
+        if path
+            .symlink_metadata()
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return Err(AppError::workspace("workspace path must not be a symlink"));
+        }
         let existed = path.exists();
         fs::create_dir_all(&path).map_err(AppError::workspace)?;
+        restrict_directory(&path)?;
         if !existed && let Some(checkout) = request.checkout {
             copy_tree(checkout, &path)?;
         }
@@ -82,6 +90,16 @@ impl WorkspaceFactory for DirWorkspaceFactory {
         writeln!(file, "{line}").map_err(AppError::workspace)?;
         Ok(())
     }
+}
+
+fn restrict_directory(path: &Path) -> Result<(), AppError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+            .map_err(AppError::workspace)?;
+    }
+    Ok(())
 }
 
 fn copy_tree(src: &Path, dest: &Path) -> Result<(), AppError> {

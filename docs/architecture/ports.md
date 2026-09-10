@@ -78,7 +78,7 @@ One use case per module, named after the CLI verb:
 - `complete`
 - `park`
 
-`start` binds a workspace, writes the goal, optionally copies a checkout, spawns through `WorkerRunner`, waits, and applies `complete`. Channel errors are classified by reaction: fail completes as `channel_error`; park calls `park` on the same Work; retry re-spawns inside that `start` up to the snapshotted limit, then fail. If an outcome artifact already exists (leftover `running` or `parked`), `start` applies `complete` and MUST NOT spawn. CLI `complete --file` is the recovery path for leftover `running` or `parked` Work; it does not park first.
+`start` binds a workspace, writes the goal, optionally copies a checkout, spawns through `WorkerRunner`, waits, and applies `complete`. Channel errors are classified by reaction: fail completes as `channel_error`; park calls `park` on the same Work; retry re-spawns inside that `start` up to the snapshotted limit, then fail. Shared workspace outcome files are rejected: only a future attempt-scoped control artifact can become a recovery authority.
 
 Later: `capture`. Not a god-object orchestrator.
 

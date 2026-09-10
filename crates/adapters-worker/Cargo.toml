@@ -13,9 +13,9 @@ workengine-domain.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 nix.workspace = true
+tempfile.workspace = true
 
 [dev-dependencies]
-tempfile.workspace = true
 
 [lints]
 workspace = true

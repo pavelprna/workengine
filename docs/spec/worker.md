@@ -12,7 +12,7 @@ This document is the canonical behaviour of Worker. Keywords follow [RFC 2119](h
 
 ## Process
 
-- **[TESTED]** A Worker MUST run as an isolated operating-system process (or a containment boundary that still appears as a process to the runner).
+- **[TESTED]** A user-configured Worker MUST run in an explicit Bubblewrap or OCI containment boundary. A profile without a sandbox MUST fail closed.
 - **[ENFORCED]** Workengine MUST NOT use an in-process agent host (chat session, IDE task, cloud agent API that owns the loop) as the Worker.
 - **[TESTED]** The runner MUST place the Worker in its own process group.
 - **[TESTED]** On timeout, hang, or abort, the runner MUST signal the process group (terminate, then kill), not only the parent PID. First-slice process-group teardown is Unix.
@@ -37,7 +37,7 @@ This document is the canonical behaviour of Worker. Keywords follow [RFC 2119](h
 
 - **[UNTESTED]** A Worker's permission profile MUST be deny-by-default. Extra rights require an explicit enable.
 - **[UNTESTED]** A Worker MUST NOT be able to perform known-destructive actions against the host environment (for example wipe paths outside its workspace).
-- **[TESTED]** A Worker MUST receive only the minimum resources and secrets required for that run. First-slice process env is empty except declared `fromEnv` references.
+- **[TESTED]** A Worker MUST receive only the minimum resources and secrets required for that run. The runner clears its environment and materializes each declared reference in a transient `0600` file mounted read-only at `/run/secrets`; only the corresponding `NAME_FILE` path is in the Worker environment.
 - **[UNTESTED]** Secrets passed to a Worker MUST NOT leak through Workengine logs or process inspection surfaces that Workengine controls.
 - **[UNTESTED]** Text from untrusted sources (inbound tickets, web, prior artifacts) MUST be treated as data, not as instructions to Workengine.
 

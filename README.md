@@ -62,8 +62,8 @@ A typical run looks like this:
 2. `next` prints the next startable id.
 3. `start` binds a workspace, writes the goal, optionally copies a checkout,
    runs the Worker, and completes.
-4. If a run is left `running` or `parked`, `complete --file` or `park` recover
-   it — including after `next` auto-parked a crash.
+4. If a run is left `running`, the next invocation parks it for recovery. A
+   shared `outcome.json` is never trusted as a recovery authority.
 
 Workengine never asks a model which Work to take, or which status comes next.
 Agent and tracker names stay in configuration and adapters, not in the core.
@@ -82,12 +82,15 @@ Agent and tracker names stay in configuration and adapters, not in the core.
 `--data-dir` (or `WORKENGINE_DATA_DIR`) chooses the SQLite store and workspace
 directories. Default: `.workengine`.
 
-`--config` (or `WORKENGINE_CONFIG`) is a TOML file of Worker profiles.
+`--config-dir` (or `WORKENGINE_CONFIG_DIR`) is a directory of Worker profiles:
+one `<profile>.toml` file per profile. That makes validation truly lazy: a bad
+unrelated profile cannot block a Work. The former monolithic `--config` is
+retained temporarily for compatibility.
 
 ## Worker profiles
 
 The default profile is `stub`. Any other name is configuration: the argv to
-spawn, env references, an optional checkout path. Point that argv at Cursor,
+spawn, secret-file references, an optional checkout path. Point that argv at Cursor,
 Claude, Codex, or whatever CLI you already run — it is a profile file, not a
 vendor `if` in the core.
 
@@ -96,13 +99,18 @@ vendor `if` in the core.
 argv = ["my-agent", "--print"]
 retry_limit = 2
 checkout = "/src"
+sandbox = { type = "bubblewrap", rootfs = "/opt/workengine/rootfs" }
 
-[profile.coder.env]
+[profile.coder.secret_file]
 API_TOKEN = { fromEnv = "API_TOKEN" }
 ```
 
-Secrets are references (`fromEnv`), never inline values. A broken profile does
-not block Work that uses a different one.
+Secrets are references (`fromEnv`), never inline values. The Worker receives
+only a transient read-only path in `API_TOKEN_FILE`, never a secret value in
+its environment. A user Worker also
+needs an explicit `bubblewrap` runtime root or digest-pinned `oci` image;
+profiles without a sandbox fail closed. A broken profile does not block Work
+that uses a different one.
 
 ## What this is not
 

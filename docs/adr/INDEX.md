@@ -7,6 +7,7 @@
 | [0002](0002-source-of-truth-is-internal.md) | Source of truth is internal | Accepted |
 | [0003](0003-worker-is-a-process.md) | Worker is a process | Accepted |
 | [0004](0004-worker-profile-is-configuration.md) | Worker profile is configuration | Accepted |
+| [0005](0005-sandboxed-attempt-protocol.md) | Sandboxed attempt protocol | Accepted |
 
 Status values: Proposed, Accepted, Superseded, Deprecated.
 

@@ -220,7 +220,7 @@ fn start_spawns_once_and_completes() {
 }
 
 #[test]
-fn start_with_artifact_does_not_spawn() {
+fn ready_work_rejects_a_preexisting_outcome_artifact() {
     let mut store = FakeStore::default();
     let clock = FakeClock { unix_ms: 1 };
     let work = ready_work(&mut store, &clock);
@@ -228,9 +228,34 @@ fn start_with_artifact_does_not_spawn() {
     ws.artifacts
         .insert(work.id().as_str().to_owned(), b"succeeded".to_vec());
     let runner = FakeRunner::new(OutcomeKind::Failed);
-    let done = start_work(&mut store, &ws, &runner, &clock, work.id()).unwrap();
-    assert_eq!(done.status(), WorkStatus::Succeeded);
+    let err = start_work(&mut store, &ws, &runner, &clock, work.id()).unwrap_err();
+    assert!(matches!(err, AppError::OutcomeSchema(_)));
     assert_eq!(runner.runs.get(), 0);
+}
+
+#[test]
+fn terminal_failed_outcome_cannot_be_reclassified() {
+    let mut store = FakeStore::default();
+    let ws = FakeWorkspace::default();
+    let runner = FakeRunner::new(OutcomeKind::Failed);
+    let clock = FakeClock { unix_ms: 1 };
+    let work = ready_work(&mut store, &clock);
+    start_work(&mut store, &ws, &runner, &clock, work.id()).unwrap();
+    let replacement = Outcome::new(OUTCOME_SCHEMA_VERSION, OutcomeKind::TimedOut, "stub").unwrap();
+    let err = complete(&mut store, &ws, &clock, work.id(), &replacement).unwrap_err();
+    assert!(matches!(err, AppError::Conflict(_)));
+    assert_eq!(ws.memory.borrow()[work.id().as_str()].len(), 1);
+}
+
+#[test]
+fn outcome_profile_must_match_work_profile() {
+    let mut store = FakeStore::default();
+    let ws = FakeWorkspace::default();
+    let clock = FakeClock { unix_ms: 1 };
+    let work = ready_work(&mut store, &clock);
+    let wrong = Outcome::new(OUTCOME_SCHEMA_VERSION, OutcomeKind::Succeeded, "other").unwrap();
+    let err = complete(&mut store, &ws, &clock, work.id(), &wrong).unwrap_err();
+    assert!(matches!(err, AppError::OutcomeSchema(_)));
 }
 
 #[test]
@@ -345,7 +370,7 @@ fn next_skips_succeeded() {
 }
 
 #[test]
-fn start_on_parked_with_artifact_does_not_spawn_or_start_again() {
+fn parked_work_rejects_a_legacy_shared_outcome_artifact() {
     let mut store = FakeStore::default();
     let clock = FakeClock { unix_ms: 1 };
     let work = ready_work(&mut store, &clock);
@@ -362,24 +387,9 @@ fn start_on_parked_with_artifact_does_not_spawn_or_start_again() {
     ws.artifacts
         .insert(work.id().as_str().to_owned(), b"succeeded".to_vec());
     let runner = FakeRunner::new(OutcomeKind::Failed);
-    let done = start_work(&mut store, &ws, &runner, &clock, work.id()).unwrap();
-    assert_eq!(done.status(), WorkStatus::Succeeded);
+    let err = start_work(&mut store, &ws, &runner, &clock, work.id()).unwrap_err();
+    assert!(matches!(err, AppError::OutcomeSchema(_)));
     assert_eq!(runner.runs.get(), 0);
-    let kinds: Vec<_> = store
-        .events(work.id())
-        .unwrap()
-        .iter()
-        .map(|e| e.kind())
-        .collect();
-    assert_eq!(
-        kinds,
-        vec![
-            workengine_domain::EventKind::Created,
-            workengine_domain::EventKind::Started,
-            workengine_domain::EventKind::Parked,
-            workengine_domain::EventKind::Completed,
-        ]
-    );
 }
 
 #[test]

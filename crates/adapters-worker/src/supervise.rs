@@ -31,7 +31,14 @@ pub(crate) fn spawn_supervised(
     let result = wait_child(&mut child, budget);
     match &result {
         Ok(ChildWait::BudgetExceeded) => emit(work_id, EVENT_KILLED, None),
-        Ok(ChildWait::Exited { .. }) => emit(work_id, EVENT_EXITED, None),
+        Ok(ChildWait::Exited { .. }) => {
+            // The direct child can exit while a background descendant still
+            // owns stdout/stderr or continues to mutate the workspace. A
+            // Worker is the whole process group, so successful parent exit
+            // also tears down anything left in that group before completion.
+            kill_group(child.id());
+            emit(work_id, EVENT_EXITED, None);
+        }
         Err(_) => {}
     }
     let _ = out_h.join();
@@ -69,7 +76,10 @@ fn drain_pipe<R: Read + Send + 'static>(
         };
         for line in BufReader::new(pipe).lines() {
             match line {
-                Ok(line) => emit(&work_id, event, Some(&line)),
+                // Child output is untrusted and can contain a credential
+                // supplied to the Worker. The public stream records that
+                // output happened, but never republishes its bytes.
+                Ok(_line) => emit(&work_id, event, None),
                 Err(_) => break,
             }
         }

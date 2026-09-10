@@ -13,7 +13,7 @@ mod process;
 mod stream;
 mod supervise;
 
-pub use process::ProcessWorkerRunner;
+pub use process::{ProcessWorkerRunner, Sandbox, SecretFile};
 pub use stream::{
     EVENT_CHILD_STDERR, EVENT_CHILD_STDOUT, EVENT_EXITED, EVENT_KILLED, EVENT_SPAWNED,
     STREAM_EVENTS, STREAM_SCHEMA_VERSION, record_line,
