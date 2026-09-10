@@ -5,16 +5,26 @@ the primary operator surface; the CLI remains useful for scripting and
 break-glass recovery. Workengine remains the only writer of Work status.
 
 This is a product roadmap, not a second behavioural specification. Normative
-rules remain in [spec](spec/work.md), public compatibility in
-[compatibility](product/compatibility.md), and architectural decisions in
-[ADRs](adr/INDEX.md).
+rules remain in the [Work](spec/work.md), [Worker](spec/worker.md),
+[Workspace](spec/workspace.md), and [Workflow](spec/workflow.md) specifications;
+public compatibility remains in [compatibility](product/compatibility.md), and
+architectural decisions remain in [ADRs](adr/INDEX.md).
+
+A milestone schedules capabilities; its bullets do not restate or weaken the
+normative rules. A milestone is complete only when the `MUST` / `MUST NOT`
+rules needed for the capabilities it claims are `[TESTED]` or `[ENFORCED]` in
+the canonical specification.
 
 ## Current baseline
 
-The current CLI slice has the Work FSM, SQLite event history, workspace binding,
-profile-based sandbox launch, process-group supervision, and JSON snapshots and
-event cursors. It does not yet have a daemon, HTTP API, Web UI, durable attempt
-provenance, live control, capture/CAS, inbound sources, or publishers.
+The current CLI slice has stable Work identity and attributes, the Work FSM,
+atomic SQLite status and append-only event history, workspace binding and
+append-only memory, versioned typed Worker outcomes, profile-based sandbox
+launch, process-group supervision, structured subprocess records, lazy profile
+validation, and JSON snapshots and event cursors. External dependencies sit
+behind application ports. It does not yet have a daemon, HTTP API, Web UI,
+durable attempt provenance, live control, capture/CAS, inbound sources, or
+publishers.
 
 The sandboxed-attempt decision is accepted, but its attempt IDs, protected
 control artifacts, configuration snapshots, checkpoint/abort supervision, and
@@ -36,8 +46,9 @@ Make observation safe and useful before adding Web controls.
   durable enough to freeze as public `v1`.
 
 Exit criterion: an observer can reconnect after an event cursor without losing
-events, and repeated polling of a running Work produces no new store event and
-does not change its status.
+or duplicating events, any two observers see the same Work snapshot, and
+repeated polling of a running Work produces no new store event and does not
+change its status.
 
 ## v0.2 — Durable execution
 
@@ -53,15 +64,21 @@ observation.
   store operations and an active-attempt lease.
 - Use protected attempt-scoped control artifacts; reject stale, foreign, or
   unproven outcomes.
-- Move confirmed outcomes and workspace memory out of the Worker-writable
-  workspace into control-plane storage.
+- Persist the mandatory accounting record for every Worker run, including its
+  Work, execution, attempt, Worker configuration, budget, and terminal reason.
+- Keep workspace memory logically bound to its Workspace, but move that memory
+  and confirmed outcomes out of the Worker-writable directory into
+  control-plane storage.
+- Retain a failed Work's workspace as a diagnostic artifact. Cleanup is a
+  separate, explicit operator action.
 - Account for a budget across retries and resumes; distinguish budget exhaustion
   from heartbeat timeout.
 - Make recovery owner-aware: recovery may only reclaim a genuinely abandoned
   attempt.
 
-Exit criterion: concurrent starts cannot run one Work twice, and only the
-matching active attempt can complete it.
+Exit criterion: concurrent starts cannot run one Work twice, only the matching
+active attempt can complete it, and a failed workspace remains available until
+an operator explicitly cleans it up.
 
 ## v0.3 — Complete observation
 
@@ -84,9 +101,13 @@ Move lifecycle control into a long-lived, single-writer supervisor.
 - Let the daemon own active supervisors; make CLI commands clients of the same
   control API.
 - Add create, start, resume, park, abort, answer, and explicit-consent commands.
+  An answer continues the same parked Work; it never creates replacement Work.
 - Implement durable checkpoint requests for park and immediate sandbox/cgroup
   teardown for abort.
-- Recover labelled OCI executions after a daemon crash.
+- Reconcile every unconfirmed active attempt after a daemon crash. Reattach only
+  when the runtime can prove ownership; otherwise reclaim it safely and return
+  the same Work to the queue from its last confirmed point. OCI labels are one
+  backend-specific source of that proof.
 - Add corresponding UI controls that wait for server-confirmed state changes.
 
 Exit criterion: park reaches a validated save point, abort never masquerades as
@@ -100,11 +121,18 @@ Close the security policy around real coding-agent workloads.
 - Add resource limits, seccomp/capability policy, no-follow filesystem handling,
   and a deny-by-default permission profile.
 - Replace direct network access with a policy-controlled egress broker.
-- Scrub data before publication and require explicit consent for irreversible
-  actions.
+- Treat text from inbound sources, web content, and prior artifacts only as
+  untrusted data; it cannot become a Workengine control command.
+- Run Workengine's own codebase operations in a controlled environment isolated
+  from Worker- or user-supplied environment settings.
+- Keep secret values out of logs and Workengine-controlled process inspection
+  surfaces, scrub data before publication, and require explicit consent for
+  irreversible actions.
 
 Exit criterion: a profile cannot obtain host access, network access, or an
-irreversible permission implicitly.
+irreversible permission implicitly; untrusted text cannot become a control
+command; and secret values do not appear in observable process records or
+published output.
 
 ## v0.6 — Queue and integrations
 
@@ -113,7 +141,8 @@ Scale from one local operator to independent projects and adapters.
 - Add capture for several workers, project/repository isolation, and centralized
   quotas.
 - Model Work relations such as parent/child, blocks, and follows.
-- Add explicit-signal inbound adapters and best-effort publishers.
+- Add explicit-signal inbound adapters and best-effort publishers. Only the
+  control plane invokes publishers; Workers never publish directly.
 - Notify the intended operator when Work parks for external input.
 - Add expected-context and compare-and-swap protection for remote mutations.
 
