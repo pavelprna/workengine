@@ -17,6 +17,10 @@ This document is the canonical behaviour of Work. Keywords follow [RFC 2119](htt
 - **[TESTED]** The domain MUST NOT name, import, or branch on a concrete inbound product.
 - **[UNTESTED]** A record in an external source MUST NOT become Work until an explicit signal exists: a ready state of that record, or an explicit operator command.
 
+Local creation is an intentional product capability, not a temporary substitute
+for a required remote source. External inbound adapters add ways to introduce
+Work; they do not replace the operator-controlled CLI path.
+
 ## Status
 
 - **[TESTED]** A Work MUST have a status that describes its place in the lifecycle.
