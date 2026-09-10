@@ -2,7 +2,8 @@
 
 Exit codes and schemas are binding for this runtime slice. A breaking change is a major version.
 
-Workengine versions with SemVer. A tag `vX.Y.Z` is a product decision, not an automatic side effect of a commit.
+Workengine versions with SemVer. A tag `vX.Y.Z` is created only by a reviewed
+release change; ordinary commits never create tags directly.
 
 The default-branch history is the human changelog of the contracts below. Message format, atomicity, and squash policy are contribution process ([../../CONTRIBUTING.md](../../CONTRIBUTING.md)), not a SemVer surface and not an architecture decision. Schema compatibility is this file.
 
@@ -61,7 +62,35 @@ Exact numbers freeze with this slice. Do not treat "non-zero" as a single failur
 - SQLite `user_version=1` is intentionally unsupported by this v2 runtime and
   is never migrated or deleted automatically.
 
+## Release process
+
+The repository uses one version for the workspace, the CLI binary, Git tags,
+GitHub Releases, and `CHANGELOG.md`. The current version lives in the root
+`Cargo.toml`; tags use the matching `vX.Y.Z` form.
+
+[Release Please](https://github.com/googleapis/release-please) reads the
+Conventional Commit history on `master`. It opens or updates one release pull
+request with the workspace version and generated changelog. Merging that pull
+request creates the annotated tag and the corresponding GitHub Release. It does
+not publish packages or binaries by itself.
+
+Before `1.0.0`, Workengine follows the SemVer convention that incompatible
+changes advance the minor version. Release Please is configured accordingly:
+
+| Change on `master` | Next version |
+| --- | --- |
+| `fix(scope): ...` | Patch (`0.1.0` → `0.1.1`) |
+| `feat(scope): ...` | Minor (`0.1.0` → `0.2.0`) |
+| `type(scope)!: ...` or `BREAKING CHANGE:` | Minor while pre-1.0; major after `1.0.0` |
+| `docs`, `test`, `refactor`, `chore`, `ci`, `build` only | No release by themselves |
+
+Use `Release-As: X.Y.Z` in a reviewed commit only when an exceptional explicit
+version is needed. Do not manually edit the version, manifest, generated release
+section, tag, or GitHub Release during normal development.
+
 ## Related
 
 - Spec: [../spec/workflow.md](../spec/workflow.md), statuses in [../spec/work.md](../spec/work.md)
 - Commits: [../../CONTRIBUTING.md](../../CONTRIBUTING.md)
+- Product milestones: [../roadmap.md](../roadmap.md)
+- Released changes: [../../CHANGELOG.md](../../CHANGELOG.md)

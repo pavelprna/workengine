@@ -51,7 +51,9 @@ Enforcement: a `commit-msg` hook (shell, no npm) locally, and the same checker i
 
 The default branch is linear: rebase, then fast-forward or rebase-merge. **Do not squash** onto the default branch. A pull request is a review boundary; commits remain the changelog and revert boundary.
 
-Release versioning (tags `vX.Y.Z`) is a product decision in `docs/product/compatibility.md`, not an automatic side effect of every push.
+Release versioning is defined in `docs/product/compatibility.md`. Conventional
+Commits drive the release proposal; do not manually bump a version or push a
+release tag. Review and merge the generated release pull request instead.
 
 ## Check
 

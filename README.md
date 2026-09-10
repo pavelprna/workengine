@@ -75,7 +75,6 @@ Agent and tracker names stay in configuration and adapters, not in the core.
 | `create --goal "<text>" [--profile stub]` | Persist a new Work as `ready` |
 | `next` | Print the next startable Work id |
 | `start --work <id> [--checkout <dir>]` | Bind a workspace, run the Worker, complete |
-| `complete --work <id> --file outcome.json` | Apply an outcome to leftover `running` or `parked` Work |
 | `park --work <id>` | Park leftover `running` Work |
 | `version` | Print `workengine <semver>` |
 
@@ -123,8 +122,9 @@ Workengine is not an agent, not an LLM supervisor, and not a tracker client.
 
 ## Status
 
-This is `0.0.0`. What you can do today is the CLI above: create, run,
-complete, park. Inbound adapters and publishers come later.
+Workengine is pre-1.0. What you can do today is the CLI above: create, run, and
+park. Inbound adapters and publishers come later. The exact released version is
+reported by `workengine version` and by the Git tag.
 
 Public contracts — command names, exit codes, schemas — live in
 [compatibility.md](docs/product/compatibility.md). Behaviour lives in
@@ -141,6 +141,8 @@ spec.
 | What CI must be able to fail | [fitness.md](docs/architecture/fitness.md) |
 | Why a shape was chosen | [ADRs](docs/adr/INDEX.md) |
 | SemVer, schemas, exit codes | [compatibility.md](docs/product/compatibility.md) |
+| Product direction and release milestones | [roadmap.md](docs/roadmap.md) |
+| Released changes | [CHANGELOG.md](CHANGELOG.md) |
 | Secrets, process kill, containment | [threat model](docs/product/threat-model.md) |
 | How to change this repo | [CONTRIBUTING.md](CONTRIBUTING.md) |
 | Entry for coding agents | [AGENTS.md](AGENTS.md) |
