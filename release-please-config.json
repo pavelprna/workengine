@@ -34,8 +34,5 @@
     ".": {
       "component": "workengine"
     }
-  },
-  "plugins": [
-    "cargo-workspace"
-  ]
+  }
 }
