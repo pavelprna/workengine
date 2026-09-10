@@ -17,11 +17,11 @@ publish = false
 rust-version = "1.98.1"
 
 [workspace.dependencies]
-workengine-domain = { path = "crates/domain", version = "0.0.0" }
-workengine-application = { path = "crates/application", version = "0.0.0" }
-workengine-adapters-store = { path = "crates/adapters-store", version = "0.0.0" }
-workengine-adapters-worker = { path = "crates/adapters-worker", version = "0.0.0" }
-workengine-adapters-workspace = { path = "crates/adapters-workspace", version = "0.0.0" }
+workengine-domain = { path = "crates/domain" }
+workengine-application = { path = "crates/application" }
+workengine-adapters-store = { path = "crates/adapters-store" }
+workengine-adapters-worker = { path = "crates/adapters-worker" }
+workengine-adapters-workspace = { path = "crates/adapters-workspace" }
 clap = { version = "4.6.6", default-features = false, features = ["std", "derive", "help", "usage", "error-context", "env"] }
 thiserror = "2.0.20"
 anyhow = "1.0.104"

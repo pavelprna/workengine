@@ -71,7 +71,7 @@ GitHub Releases, and `CHANGELOG.md`. The current version lives in the root
 [Release Please](https://github.com/googleapis/release-please) reads the
 Conventional Commit history on `master`. It opens or updates one release pull
 request with the workspace version and generated changelog. Merging that pull
-request creates the annotated tag and the corresponding GitHub Release. It does
+request creates the matching tag and the corresponding GitHub Release. It does
 not publish packages or binaries by itself.
 
 Before `1.0.0`, Workengine follows the SemVer convention that incompatible
