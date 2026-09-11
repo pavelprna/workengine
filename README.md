@@ -83,9 +83,10 @@ Agent and tracker names stay in configuration and adapters, not in the core.
 directories. Default: `.workengine`.
 
 `serve` binds only to `127.0.0.1` and `::1`. Its browser UI and `/api/v0` API
-never read SQLite directly. The UI can create a `ready` Work, but cannot start,
-park, or complete one; those controls wait for durable execution. The API is
-intentionally internal until the durable execution model is ready.
+never read SQLite directly. The UI can create `ready` Work and explicitly start
+`ready` or `parked` Work using its locally configured profile. It cannot supply
+argv, secrets, sandbox, workspace, or budget settings, and it cannot park,
+abort, or complete Work directly. The API remains intentionally internal.
 
 `--config-dir` (or `WORKENGINE_CONFIG_DIR`) is a directory of Worker profiles:
 one `<profile>.toml` file per profile. That makes validation truly lazy: a bad

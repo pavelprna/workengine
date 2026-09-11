@@ -28,8 +28,8 @@ First-slice transitions. Status names are defined in [work.md](work.md). Workeng
 
 ## Operations
 
-The CLI exposes `create`, `next`, `start`, and `park`; the localhost Web intake
-also exposes the narrow `create` operation. `complete` is an internal
+The CLI exposes `create`, `next`, `start`, and `park`; the localhost Web surface
+also exposes narrow `create` and explicit `start` operations. `complete` is an internal
 control-plane operation, not a user command. Their rules:
 
 - **[TESTED]** `create` MUST persist a new Work as `ready` with a `Created` event, atomically, and MUST NOT spawn a Worker.
@@ -73,7 +73,7 @@ control-plane operation, not a user command. Their rules:
   It MUST contain secret references, never secret values.
 - **[TESTED]** A confirmed outcome MUST bind the closed Worker outcome to its
   Work, execution, and attempt identities.
-- **[UNTESTED]** Only the matching active attempt lease MAY confirm an outcome.
+- **[TESTED]** Only the matching active attempt lease MAY confirm an outcome.
   A stale, foreign, or unproven candidate outcome MUST NOT change Work status.
 
 ## Publication and observation

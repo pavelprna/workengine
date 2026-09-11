@@ -31,11 +31,12 @@ Workengine is a hexagonal control plane. Layers are Cargo crates. A forbidden de
          +----------------------------------------+
 ```
 
-The local HTTP adapter is an inbound observer plus deliberately narrow intake.
-Its GET/SSE routes use the read-only query port and do not recover or change
-Work. Its sole mutation is `POST /api/v0/works`, which invokes application
-`create` with a goal and optional Worker profile to make `ready` Work. Publisher
-remains later; all execution controls stay CLI-only.
+The local HTTP adapter is an inbound observer plus deliberately narrow operator
+control. Its GET/SSE routes use the read-only query port and do not recover or
+change Work. `POST /api/v0/works` invokes application `create` with a goal and
+optional Worker profile; `POST /api/v0/works/{workId}/start` invokes the same
+foreground application start path as the CLI through a control supplied by the
+composition root. Publisher and other live controls remain later work.
 
 ## Crates
 

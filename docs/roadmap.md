@@ -24,14 +24,17 @@ launch, process-group supervision, structured subprocess records, lazy profile
 validation, and JSON snapshots and event cursors. v0.1 is complete: the
 localhost-only HTTP/SSE API offers read-only observation plus narrow local
 intake, and the embedded Web UI provides overview, a filterable paginated
-queue, Work detail and timeline, and the diagnostic boundary. External
-dependencies sit behind application ports. It does not yet have a daemon,
-durable attempt provenance, live control, capture/CAS, external inbound
-sources, or publishers.
+queue, Work detail and timeline, and the diagnostic boundary. The v0.3 operator
+slice adds explicit localhost launch through the same application path as the
+CLI, backed by an exclusive active-attempt lease and control-plane confirmed
+outcomes. External dependencies sit behind application ports. It does not yet
+have a daemon, complete crash ownership reconciliation, capture, external
+inbound sources, or publishers.
 
-The sandboxed-attempt decision is accepted, but its attempt IDs, protected
-control artifacts, configuration snapshots, checkpoint/abort supervision, and
-per-Work CAS remain pending. See [ADR 0005](adr/0005-sandboxed-attempt-protocol.md).
+The sandboxed-attempt decision is accepted. Attempt IDs, immutable execution
+snapshots, per-Work active leases, and confirmed outcomes are present;
+protected control artifacts and checkpoint/abort supervision remain pending.
+See [ADR 0005](adr/0005-sandboxed-attempt-protocol.md).
 
 ## v0.1 — Observe and intake
 

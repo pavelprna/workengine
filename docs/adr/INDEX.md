@@ -11,6 +11,7 @@
 | [0006](0006-local-observer-boundary.md) | Local Web observer boundary | Partially superseded by 0007 |
 | [0007](0007-local-operator-intake.md) | Local operator intake before live control | Accepted |
 | [0008](0008-execution-attempt-identity.md) | Execution and attempt identity | Accepted |
+| [0009](0009-local-operator-launch.md) | Local operator launch through the foreground control path | Accepted |
 
 Status values: Proposed, Accepted, Superseded, Deprecated.
 

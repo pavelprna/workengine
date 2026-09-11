@@ -1,6 +1,8 @@
 # Ports
 
-Ports are traits in `workengine-application`. Adapters implement them. The first vertical slice implements the four runtime ports; inbound and publish wait.
+Ports are traits in `workengine-application`. Adapters implement them. The first
+vertical slice implements the four runtime ports. Local inbound observation,
+intake, and explicit start are present; external inbound and publish wait.
 
 Trait signatures below are intent, not frozen Rust. The crate is the API. Behaviour (`MUST` / `MUST NOT`) lives in `docs/spec/`. This file maps each port to adapters.
 
@@ -60,7 +62,7 @@ uses the same `create` use case and is not an external source.
 
 | First adapter | Next |
 | --- | --- |
-| Localhost HTTP query/SSE observer and operator intake; CLI creates Work | Any tracker behind the port |
+| Localhost HTTP query/SSE observer, operator intake, and explicit start; CLI creates and starts Work | Any tracker behind the port |
 
 The domain does not mention a tracker. Adding a source is a new adapter crate or module, not a new entity. See [work.md](../spec/work.md) Source.
 
