@@ -41,6 +41,7 @@ tokio = { version = "1.48.0", features = ["macros", "net", "rt-multi-thread", "t
 async-stream = "0.3.6"
 mime_guess = "2.0.5"
 tower = { version = "0.5.3", default-features = false, features = ["util"] }
+sha2 = "0.10.9"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

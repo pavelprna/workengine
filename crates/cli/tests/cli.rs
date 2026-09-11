@@ -65,6 +65,30 @@ fn status_and_event_count(data_dir: &std::path::Path, id: &str) -> (String, i64)
     (status, events)
 }
 
+fn http_request(port: u16, request: &[u8]) -> std::io::Result<String> {
+    use std::io::{Read, Write};
+
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", port))?;
+    stream.set_read_timeout(Some(Duration::from_secs(1)))?;
+    stream.write_all(request)?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response)?;
+    Ok(response)
+}
+
+fn wait_for_http(port: u16, request: &[u8]) -> String {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut last_error = None;
+    while Instant::now() < deadline {
+        match http_request(port, request) {
+            Ok(response) => return response,
+            Err(error) => last_error = Some(error),
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!("server did not answer before deadline: {last_error:?}")
+}
+
 #[test]
 fn version_prints_package_version() {
     let output = bin().arg("version").output().unwrap();
@@ -144,8 +168,7 @@ fn read_commands_do_not_recover_running_work() {
 
 #[test]
 fn serve_exposes_embedded_health_without_recovery() {
-    use std::io::{Read, Write};
-    use std::net::{TcpListener, TcpStream};
+    use std::net::TcpListener;
 
     let directory = tempfile::tempdir().unwrap();
     let id = create_work(directory.path());
@@ -167,20 +190,10 @@ fn serve_exposes_embedded_health_without_recovery() {
         ])
         .spawn()
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(3);
-    let mut response = String::new();
-    while Instant::now() < deadline {
-        if let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)) {
-            stream
-                .write_all(
-                    b"GET /api/v0/health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
-                )
-                .unwrap();
-            stream.read_to_string(&mut response).unwrap();
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    let response = wait_for_http(
+        port,
+        b"GET /api/v0/health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
     let _ = server.kill();
     let _ = server.wait();
     assert!(response.contains("200 OK"), "response: {response}");
@@ -191,6 +204,51 @@ fn serve_exposes_embedded_health_without_recovery() {
     assert_eq!(
         status_and_event_count(directory.path(), &id),
         ("running".to_owned(), 1)
+    );
+}
+
+#[test]
+fn serve_starts_work_through_the_local_control_route() {
+    use std::net::TcpListener;
+
+    let directory = tempfile::tempdir().unwrap();
+    let id = create_work(directory.path());
+    let listener = match TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => listener,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(error) => panic!("reserve localhost port: {error}"),
+    };
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let mut server = bin()
+        .args([
+            "--data-dir",
+            directory.path().to_str().unwrap(),
+            "serve",
+            "--port",
+            &port.to_string(),
+        ])
+        .spawn()
+        .unwrap();
+    let health = wait_for_http(
+        port,
+        b"GET /api/v0/health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    assert!(health.contains("200 OK"), "response: {health}");
+    let request = format!(
+        "POST /api/v0/works/{id}/start HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    );
+    let response = http_request(port, request.as_bytes()).unwrap();
+    let _ = server.kill();
+    let _ = server.wait();
+    assert!(response.contains("200 OK"), "response: {response}");
+    assert!(
+        response.contains("\"status\":\"succeeded\""),
+        "response: {response}"
+    );
+    assert_eq!(
+        status_and_event_count(directory.path(), &id),
+        ("succeeded".to_owned(), 3)
     );
 }
 
@@ -359,6 +417,22 @@ fn independent_create_is_not_blocked_by_a_running_work() {
         }
     }
     assert!(saw_spawned, "start never emitted spawned");
+    let duplicate = bin()
+        .args([
+            "--data-dir",
+            dir.path().to_str().unwrap(),
+            "start",
+            "--work",
+            &id,
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        duplicate.status.code(),
+        Some(10),
+        "duplicate start stderr: {}",
+        String::from_utf8_lossy(&duplicate.stderr)
+    );
     let output = bin()
         .args([
             "--data-dir",

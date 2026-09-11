@@ -4,14 +4,16 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use workengine_domain::{
-    OUTCOME_SCHEMA_VERSION, Outcome, OutcomeKind, Work, WorkEvent, WorkId, WorkStatus,
+    AttemptId, ChannelPolicy, ConfirmedOutcome, ContentDigest, EXECUTION_SPEC_SCHEMA_VERSION,
+    ExecutionId, ExecutionSpec, OUTCOME_SCHEMA_VERSION, Outcome, OutcomeKind, Work, WorkEvent,
+    WorkId, WorkStatus,
 };
 
 use crate::clock::Clock;
 use crate::error::{AppError, ChannelReaction};
 use crate::ports::{
-    BindRequest, RunRequest, SequencedEvent, StartRequest, WorkQuery, WorkStore, WorkerRunner,
-    WorkspaceFactory,
+    AttemptClaim, BindRequest, RunRequest, SequencedEvent, StartRequest, WorkQuery, WorkStore,
+    WorkerRunner, WorkspaceFactory,
 };
 use crate::{complete, create, next, park, recover_unconfirmed, start};
 
@@ -31,6 +33,7 @@ impl Clock for FakeClock {
 struct FakeStore {
     works: HashMap<String, Work>,
     events: Vec<WorkEvent>,
+    active: HashMap<String, (String, String)>,
 }
 
 impl WorkQuery for FakeStore {
@@ -76,6 +79,96 @@ impl WorkStore for FakeStore {
         self.works
             .insert(work.id().as_str().to_owned(), work.clone());
         self.events.push(event);
+        Ok(())
+    }
+
+    fn claim_attempt(&mut self, claim: &AttemptClaim<'_>) -> Result<(), AppError> {
+        let key = claim.work.id().as_str().to_owned();
+        if self.active.contains_key(&key)
+            || self
+                .works
+                .get(&key)
+                .is_none_or(|stored| stored.status() == WorkStatus::Running)
+        {
+            return Err(AppError::Conflict("active attempt".to_owned()));
+        }
+        self.active.insert(
+            key.clone(),
+            (
+                claim.execution_id.as_str().to_owned(),
+                claim.attempt_id.as_str().to_owned(),
+            ),
+        );
+        self.works.insert(key, claim.work.clone());
+        self.events.push(claim.event.clone());
+        Ok(())
+    }
+
+    fn retry_attempt(
+        &mut self,
+        execution_id: &ExecutionId,
+        previous_attempt_id: &AttemptId,
+        next_attempt_id: &AttemptId,
+        _started_at_unix_ms: u64,
+    ) -> Result<(), AppError> {
+        let Some((_, active_attempt)) = self
+            .active
+            .values_mut()
+            .find(|(execution, _)| execution == execution_id.as_str())
+        else {
+            return Err(AppError::Conflict("missing execution lease".to_owned()));
+        };
+        if active_attempt != previous_attempt_id.as_str() {
+            return Err(AppError::Conflict("foreign attempt".to_owned()));
+        }
+        *active_attempt = next_attempt_id.as_str().to_owned();
+        Ok(())
+    }
+
+    fn confirm_attempt(
+        &mut self,
+        work: &Work,
+        event: WorkEvent,
+        outcome: &ConfirmedOutcome,
+    ) -> Result<(), AppError> {
+        self.release_matching(work.id(), outcome.execution_id(), outcome.attempt_id())?;
+        self.works
+            .insert(work.id().as_str().to_owned(), work.clone());
+        self.events.push(event);
+        Ok(())
+    }
+
+    fn park_attempt(
+        &mut self,
+        work: &Work,
+        event: WorkEvent,
+        execution_id: &ExecutionId,
+        attempt_id: &AttemptId,
+    ) -> Result<(), AppError> {
+        self.release_matching(work.id(), execution_id, attempt_id)?;
+        self.works
+            .insert(work.id().as_str().to_owned(), work.clone());
+        self.events.push(event);
+        Ok(())
+    }
+}
+
+impl FakeStore {
+    fn release_matching(
+        &mut self,
+        work_id: &WorkId,
+        execution_id: &ExecutionId,
+        attempt_id: &AttemptId,
+    ) -> Result<(), AppError> {
+        let key = work_id.as_str();
+        let expected = (
+            execution_id.as_str().to_owned(),
+            attempt_id.as_str().to_owned(),
+        );
+        if self.active.get(key) != Some(&expected) {
+            return Err(AppError::Conflict("foreign attempt".to_owned()));
+        }
+        self.active.remove(key);
         Ok(())
     }
 }
@@ -169,6 +262,7 @@ fn start_work_with(
     id: &WorkId,
     retry_limit: u32,
 ) -> Result<Work, AppError> {
+    let spec = execution_spec(id, retry_limit);
     start(
         store,
         ws,
@@ -176,11 +270,29 @@ fn start_work_with(
         clock,
         &StartRequest {
             id,
-            budget: BUDGET,
-            retry_limit,
+            execution_spec: &spec,
             checkout: None,
         },
     )
+}
+
+fn execution_spec(id: &WorkId, retry_limit: u32) -> ExecutionSpec {
+    ExecutionSpec::new(
+        EXECUTION_SPEC_SCHEMA_VERSION,
+        id.clone(),
+        "stub",
+        ContentDigest::parse(format!("sha256:{}", "1".repeat(64))).unwrap(),
+        ContentDigest::parse(format!("sha256:{}", "2".repeat(64))).unwrap(),
+        BUDGET.as_millis() as u64,
+        retry_limit,
+        if retry_limit == 0 {
+            ChannelPolicy::Fail
+        } else {
+            ChannelPolicy::RetryThenFail
+        },
+        Vec::new(),
+    )
+    .unwrap()
 }
 
 #[test]

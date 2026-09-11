@@ -1,7 +1,10 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use workengine_domain::{Outcome, OutcomeKind, Work, WorkEvent, WorkId, WorkStatus};
+use workengine_domain::{
+    AttemptId, ConfirmedOutcome, ExecutionId, ExecutionSpec, Outcome, OutcomeKind, Work, WorkEvent,
+    WorkId, WorkStatus,
+};
 
 use crate::error::AppError;
 
@@ -31,6 +34,44 @@ pub trait WorkQuery {
 pub trait WorkStore: WorkQuery {
     /// Status update and event append are one operation.
     fn put(&mut self, work: &Work, event: WorkEvent) -> Result<(), AppError>;
+
+    /// Atomically installs the one active-attempt lease and commits `running`.
+    fn claim_attempt(&mut self, claim: &AttemptClaim<'_>) -> Result<(), AppError>;
+
+    /// Atomically replaces a retrying attempt without changing Work status.
+    fn retry_attempt(
+        &mut self,
+        execution_id: &ExecutionId,
+        previous_attempt_id: &AttemptId,
+        next_attempt_id: &AttemptId,
+        started_at_unix_ms: u64,
+    ) -> Result<(), AppError>;
+
+    /// Atomically confirms the matching lease, terminal Work, event, and proof.
+    fn confirm_attempt(
+        &mut self,
+        work: &Work,
+        event: WorkEvent,
+        outcome: &ConfirmedOutcome,
+    ) -> Result<(), AppError>;
+
+    /// Atomically releases the matching lease into the parked queue.
+    fn park_attempt(
+        &mut self,
+        work: &Work,
+        event: WorkEvent,
+        execution_id: &ExecutionId,
+        attempt_id: &AttemptId,
+    ) -> Result<(), AppError>;
+}
+
+pub struct AttemptClaim<'a> {
+    pub execution_id: &'a ExecutionId,
+    pub attempt_id: &'a AttemptId,
+    pub spec: &'a ExecutionSpec,
+    pub work: &'a Work,
+    pub event: WorkEvent,
+    pub started_at_unix_ms: u64,
 }
 
 /// How to bind the isolated directory for one Work.
@@ -67,8 +108,6 @@ pub struct RunRequest<'a> {
 /// Inputs for `start` that are not ports.
 pub struct StartRequest<'a> {
     pub id: &'a WorkId,
-    pub budget: Duration,
-    /// Extra spawns after a retry-classified channel error. Snapshotted for this call.
-    pub retry_limit: u32,
+    pub execution_spec: &'a ExecutionSpec,
     pub checkout: Option<&'a Path>,
 }

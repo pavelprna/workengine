@@ -1,16 +1,17 @@
+use std::time::{Duration, Instant};
+
 use workengine_domain::{
-    OUTCOME_SCHEMA_VERSION, Outcome, OutcomeKind, Work, WorkEvent, WorkStatus,
+    AttemptId, CONFIRMED_OUTCOME_SCHEMA_VERSION, ConfirmedOutcome, ExecutionId,
+    OUTCOME_SCHEMA_VERSION, Outcome, OutcomeKind, Work, WorkEvent,
 };
 
 use crate::clock::Clock;
-use crate::complete::complete;
 use crate::error::{AppError, ChannelReaction};
-use crate::park::park;
 use crate::ports::{
-    BindRequest, RunRequest, StartRequest, WorkStore, WorkerRunner, WorkspaceFactory,
+    AttemptClaim, BindRequest, RunRequest, StartRequest, WorkStore, WorkerRunner, WorkspaceFactory,
 };
 
-/// Bind a workspace, spawn a Worker, then complete from its returned outcome.
+/// Claim an attempt, bind a workspace, spawn a Worker, and confirm its outcome.
 pub fn start(
     store: &mut impl WorkStore,
     workspaces: &impl WorkspaceFactory,
@@ -22,8 +23,14 @@ pub fn start(
     let mut work = store
         .get(id)?
         .ok_or_else(|| AppError::NotFound(id.clone()))?;
-    let artifact = workspaces.read_artifact(id)?;
-    if artifact.is_some() {
+    if request.execution_spec.work_id() != id
+        || request.execution_spec.worker_profile() != work.attributes().worker_profile()
+    {
+        return Err(AppError::Conflict(
+            "execution spec does not belong to this Work and profile".to_owned(),
+        ));
+    }
+    if workspaces.read_artifact(id)?.is_some() {
         return Err(AppError::outcome_schema(
             "shared workspace outcome artifacts are unsupported; a protected attempt artifact is required",
         ));
@@ -35,50 +42,152 @@ pub fn start(
         checkout: request.checkout,
     })?;
     work.bind_workspace(root.to_string_lossy().into_owned())?;
-    if work.status() == WorkStatus::Running {
-        park(store, clock, id)?;
-        work = store
-            .get(id)?
-            .ok_or_else(|| AppError::NotFound(id.clone()))?;
-        work.bind_workspace(root.to_string_lossy().into_owned())?;
-    }
+    let from = work.status();
+    work.start()?;
 
-    if work.status() != WorkStatus::Running {
-        let from = work.status();
-        work.start()?;
-        store.put(&work, WorkEvent::started(&work, from, clock.unix_ms()))?;
-    }
+    let execution_id = generated_execution_id()?;
+    let mut attempt_id = generated_attempt_id()?;
+    let started_at = clock.unix_ms();
+    store.claim_attempt(&AttemptClaim {
+        execution_id: &execution_id,
+        attempt_id: &attempt_id,
+        spec: request.execution_spec,
+        work: &work,
+        event: WorkEvent::started(&work, from, started_at),
+        started_at_unix_ms: started_at,
+    })?;
 
-    let profile = work.attributes().worker_profile().to_owned();
-    let mut remaining = request.retry_limit;
+    let budget = Duration::from_millis(request.execution_spec.wall_clock_budget_ms());
+    let started = Instant::now();
+    let mut remaining_retries = request.execution_spec.retry_limit();
     loop {
+        let remaining_budget = budget.saturating_sub(started.elapsed());
+        if remaining_budget.is_zero() {
+            let outcome = Outcome::new(
+                OUTCOME_SCHEMA_VERSION,
+                OutcomeKind::BudgetExceeded,
+                work.attributes().worker_profile(),
+            )?;
+            return confirm(
+                store,
+                workspaces,
+                clock,
+                &mut work,
+                request,
+                &execution_id,
+                &attempt_id,
+                outcome,
+            );
+        }
         match runner.run(&RunRequest {
             work: &work,
             workspace_root: &root,
-            budget: request.budget,
+            budget: remaining_budget,
         }) {
-            Ok(outcome) => return complete(store, workspaces, clock, id, &outcome),
-            Err(err @ AppError::OutcomeSchema(_)) => return Err(err),
-            Err(AppError::Channel(ChannelReaction::Park)) => {
-                return park(store, clock, id);
+            Ok(outcome) => {
+                return confirm(
+                    store,
+                    workspaces,
+                    clock,
+                    &mut work,
+                    request,
+                    &execution_id,
+                    &attempt_id,
+                    outcome,
+                );
             }
-            Err(AppError::Channel(ChannelReaction::Retry)) if remaining > 0 => {
-                remaining -= 1;
+            Err(err @ AppError::OutcomeSchema(_)) => {
+                park_claim(store, clock, &mut work, &execution_id, &attempt_id)?;
+                return Err(err);
+            }
+            Err(AppError::Channel(ChannelReaction::Park)) => {
+                return park_claim(store, clock, &mut work, &execution_id, &attempt_id);
+            }
+            Err(AppError::Channel(ChannelReaction::Retry)) if remaining_retries > 0 => {
+                remaining_retries -= 1;
+                let next_attempt_id = generated_attempt_id()?;
+                store.retry_attempt(
+                    &execution_id,
+                    &attempt_id,
+                    &next_attempt_id,
+                    clock.unix_ms(),
+                )?;
+                attempt_id = next_attempt_id;
             }
             Err(AppError::Channel(ChannelReaction::Retry | ChannelReaction::Fail)) | Err(_) => {
-                return persist_channel(store, workspaces, clock, id, &profile);
+                let outcome = Outcome::new(
+                    OUTCOME_SCHEMA_VERSION,
+                    OutcomeKind::ChannelError,
+                    work.attributes().worker_profile(),
+                )?;
+                return confirm(
+                    store,
+                    workspaces,
+                    clock,
+                    &mut work,
+                    request,
+                    &execution_id,
+                    &attempt_id,
+                    outcome,
+                );
             }
         }
     }
 }
 
-fn persist_channel(
+#[allow(clippy::too_many_arguments)]
+fn confirm(
     store: &mut impl WorkStore,
     workspaces: &impl WorkspaceFactory,
     clock: &impl Clock,
-    id: &workengine_domain::WorkId,
-    profile: &str,
+    work: &mut Work,
+    request: &StartRequest<'_>,
+    execution_id: &ExecutionId,
+    attempt_id: &AttemptId,
+    outcome: Outcome,
 ) -> Result<Work, AppError> {
-    let outcome = Outcome::new(OUTCOME_SCHEMA_VERSION, OutcomeKind::ChannelError, profile)?;
-    complete(store, workspaces, clock, id, &outcome)
+    let confirmed_at = clock.unix_ms();
+    let confirmed = ConfirmedOutcome::new(
+        CONFIRMED_OUTCOME_SCHEMA_VERSION,
+        execution_id.clone(),
+        attempt_id.clone(),
+        request.execution_spec,
+        outcome,
+        confirmed_at,
+    )?;
+    let from = work.status();
+    work.complete(confirmed.outcome())?;
+    store.confirm_attempt(
+        work,
+        WorkEvent::completed(work, from, confirmed.outcome().kind(), confirmed_at),
+        &confirmed,
+    )?;
+    workspaces.record_memory(work.id(), work.status(), confirmed.outcome().kind())?;
+    Ok(work.clone())
+}
+
+fn park_claim(
+    store: &mut impl WorkStore,
+    clock: &impl Clock,
+    work: &mut Work,
+    execution_id: &ExecutionId,
+    attempt_id: &AttemptId,
+) -> Result<Work, AppError> {
+    let from = work.status();
+    work.park()?;
+    store.park_attempt(
+        work,
+        WorkEvent::parked(work, from, clock.unix_ms()),
+        execution_id,
+        attempt_id,
+    )?;
+    Ok(work.clone())
+}
+
+fn generated_execution_id() -> Result<ExecutionId, AppError> {
+    ExecutionId::parse(format!("execution-{}", uuid::Uuid::new_v4())).map_err(AppError::from)
+}
+
+fn generated_attempt_id() -> Result<AttemptId, AppError> {
+    AttemptId::parse(format!("attempt-{}", uuid::Uuid::new_v4())).map_err(AppError::from)
 }

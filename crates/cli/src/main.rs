@@ -1,16 +1,21 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
-use workengine_adapters_http::serve;
+use sha2::{Digest, Sha256};
+use workengine_adapters_http::{StartControl, serve};
 use workengine_adapters_store::{SqliteObserver, SqliteStore};
 use workengine_adapters_worker::{ProcessWorkerRunner, StubBehavior, StubWorkerRunner};
 use workengine_adapters_workspace::DirWorkspaceFactory;
 use workengine_application::{
     AppError, StartRequest, SystemClock, WorkQuery, create, next, park, recover_unconfirmed, start,
 };
-use workengine_domain::{DomainError, OutcomeKind, WorkId, WorkStatus};
+use workengine_domain::{
+    ChannelPolicy, ContentDigest, DomainError, EXECUTION_SPEC_SCHEMA_VERSION, ExecutionSpec,
+    OutcomeKind, SecretRef, Work, WorkId, WorkStatus,
+};
 
 mod profile;
 
@@ -125,6 +130,7 @@ fn run() -> anyhow::Result<u8> {
         .data_dir
         .clone()
         .unwrap_or_else(|| PathBuf::from(".workengine"));
+    let launch_options = LaunchOptions::from_cli(&cli, data_dir.clone());
     match cli.command {
         Command::Version => {
             println!("{}", version_line());
@@ -179,45 +185,19 @@ fn run() -> anyhow::Result<u8> {
             // The HTTP adapter uses this writer only for explicit operator intake.
             let store = SqliteStore::open(&data_dir)?;
             let observer = SqliteObserver::open(&data_dir)?;
-            serve(store, observer, port, version_line())?;
+            let control = Arc::new(launch_options);
+            serve(store, observer, control, port, version_line())?;
             Ok(0)
         }
         Command::Start { work, checkout } => {
-            let mut store = open_store(&data_dir, true)?;
-            let workspaces = DirWorkspaceFactory::new(&data_dir);
             let id = WorkId::parse(work)?;
-            let profile_name = store
-                .get(&id)?
-                .ok_or_else(|| AppError::NotFound(id.clone()))?
-                .attributes()
-                .worker_profile()
-                .to_owned();
-            let selected = select_runner(
-                cli.config.as_deref(),
-                cli.config_dir.as_deref(),
-                &cli.stub_behavior,
-                cli.retry_limit,
-                &profile_name,
-                checkout,
-            )?;
-            let budget = cli
-                .budget_ms
-                .map(Duration::from_millis)
-                .unwrap_or(DEFAULT_BUDGET);
-            let work = start(
-                &mut store,
-                &workspaces,
-                &selected.runner,
-                &SystemClock,
-                &StartRequest {
-                    id: &id,
-                    budget,
-                    retry_limit: selected.retry_limit,
-                    checkout: selected.checkout.as_deref(),
-                },
-            )?;
+            let work = launch_options.start_with_checkout(&id, checkout)?;
             println!("{} {}", work.id(), work.status());
-            Ok(exit_for_status(work.status(), outcome_kind(&store, &id)?))
+            let observer = SqliteObserver::open(&data_dir)?;
+            Ok(exit_for_status(
+                work.status(),
+                outcome_kind(&observer, &id)?,
+            ))
         }
         Command::Park { work } => {
             let mut store = open_store(&data_dir, false)?;
@@ -226,6 +206,74 @@ fn run() -> anyhow::Result<u8> {
             println!("{} {}", parked.id(), parked.status());
             Ok(0)
         }
+    }
+}
+
+#[derive(Clone)]
+struct LaunchOptions {
+    data_dir: PathBuf,
+    config: Option<PathBuf>,
+    config_dir: Option<PathBuf>,
+    stub_behavior: String,
+    budget_ms: Option<u64>,
+    retry_limit: Option<u32>,
+}
+
+impl LaunchOptions {
+    fn from_cli(cli: &Cli, data_dir: PathBuf) -> Self {
+        Self {
+            data_dir,
+            config: cli.config.clone(),
+            config_dir: cli.config_dir.clone(),
+            stub_behavior: cli.stub_behavior.clone(),
+            budget_ms: cli.budget_ms,
+            retry_limit: cli.retry_limit,
+        }
+    }
+
+    fn start_with_checkout(&self, id: &WorkId, checkout: Option<PathBuf>) -> anyhow::Result<Work> {
+        let mut store = open_store(&self.data_dir, false)?;
+        let profile_name = store
+            .get(id)?
+            .ok_or_else(|| AppError::NotFound(id.clone()))?
+            .attributes()
+            .worker_profile()
+            .to_owned();
+        let selected = select_runner(
+            self.config.as_deref(),
+            self.config_dir.as_deref(),
+            &self.stub_behavior,
+            self.retry_limit,
+            &profile_name,
+            checkout,
+        )?;
+        let budget = self
+            .budget_ms
+            .map(Duration::from_millis)
+            .unwrap_or(DEFAULT_BUDGET);
+        let execution_spec = selected.execution_spec(id, &profile_name, budget)?;
+        let workspaces = DirWorkspaceFactory::new(&self.data_dir);
+        Ok(start(
+            &mut store,
+            &workspaces,
+            &selected.runner,
+            &SystemClock,
+            &StartRequest {
+                id,
+                execution_spec: &execution_spec,
+                checkout: selected.checkout.as_deref(),
+            },
+        )?)
+    }
+}
+
+impl StartControl for LaunchOptions {
+    fn start(&self, id: &WorkId) -> Result<Work, AppError> {
+        self.start_with_checkout(id, None).map_err(|error| {
+            error
+                .downcast::<AppError>()
+                .unwrap_or_else(|error| AppError::worker(error.to_string()))
+        })
     }
 }
 
@@ -257,6 +305,34 @@ struct SelectedRunner {
     runner: AnyRunner,
     retry_limit: u32,
     checkout: Option<PathBuf>,
+    worker_config_digest: ContentDigest,
+    runtime_digest: ContentDigest,
+    secret_refs: Vec<SecretRef>,
+}
+
+impl SelectedRunner {
+    fn execution_spec(
+        &self,
+        work_id: &WorkId,
+        profile: &str,
+        budget: Duration,
+    ) -> anyhow::Result<ExecutionSpec> {
+        Ok(ExecutionSpec::new(
+            EXECUTION_SPEC_SCHEMA_VERSION,
+            work_id.clone(),
+            profile,
+            self.worker_config_digest.clone(),
+            self.runtime_digest.clone(),
+            u64::try_from(budget.as_millis()).unwrap_or(u64::MAX),
+            self.retry_limit,
+            if self.retry_limit == 0 {
+                ChannelPolicy::Fail
+            } else {
+                ChannelPolicy::RetryThenFail
+            },
+            self.secret_refs.clone(),
+        )?)
+    }
 }
 
 fn config_has_profile(table: &toml::Table, name: &str) -> bool {
@@ -282,6 +358,17 @@ fn select_runner(
         let listed = config_has_profile(&table, profile_name);
         match profile::resolve_profile(&table, profile_name, |key| std::env::var(key).ok()) {
             Ok(resolved) => {
+                let config_material = format!(
+                    "argv={:?};sandbox={:?};secrets={:?}",
+                    resolved.argv,
+                    resolved.sandbox,
+                    resolved
+                        .secret_refs
+                        .iter()
+                        .map(|reference| (reference.name(), reference.source().reference()))
+                        .collect::<Vec<_>>()
+                );
+                let runtime_material = format!("{:?}", resolved.sandbox);
                 let runner = ProcessWorkerRunner::new(
                     resolved.argv,
                     resolved.secret_files,
@@ -291,6 +378,9 @@ fn select_runner(
                     runner: AnyRunner::Process(runner),
                     retry_limit: retry_limit.unwrap_or(resolved.retry_limit),
                     checkout: checkout.or(resolved.checkout),
+                    worker_config_digest: digest(config_material.as_bytes())?,
+                    runtime_digest: digest(runtime_material.as_bytes())?,
+                    secret_refs: resolved.secret_refs,
                 });
             }
             Err(_) if profile_name == "stub" && !listed => {}
@@ -307,7 +397,15 @@ fn select_runner(
         runner: AnyRunner::Stub(StubWorkerRunner::new(behavior)),
         retry_limit: retry_limit.unwrap_or(0),
         checkout,
+        worker_config_digest: digest(format!("stub:{stub_behavior}").as_bytes())?,
+        runtime_digest: digest(b"workengine-stub-process-v1")?,
+        secret_refs: Vec::new(),
     })
+}
+
+fn digest(bytes: &[u8]) -> anyhow::Result<ContentDigest> {
+    let hex = format!("{:x}", Sha256::digest(bytes));
+    Ok(ContentDigest::parse(format!("sha256:{hex}"))?)
 }
 
 fn init_tracing() {
@@ -337,7 +435,7 @@ fn open_store(data_dir: &std::path::Path, recover: bool) -> anyhow::Result<Sqlit
     Ok(store)
 }
 
-fn outcome_kind(store: &SqliteStore, id: &WorkId) -> Result<Option<OutcomeKind>, AppError> {
+fn outcome_kind(store: &impl WorkQuery, id: &WorkId) -> Result<Option<OutcomeKind>, AppError> {
     Ok(store.events(id)?.last().and_then(|e| e.outcome_kind()))
 }
 

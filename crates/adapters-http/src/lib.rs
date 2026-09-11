@@ -1,4 +1,4 @@
-//! Localhost-only HTTP adapter for operator intake and observation.
+//! Localhost-only HTTP adapter for operator intake, launch, and observation.
 
 use std::convert::Infallible;
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -10,7 +10,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use workengine_adapters_store::{SqliteObserver, SqliteStore};
@@ -28,12 +28,19 @@ struct ObserverState {
     query: Arc<Mutex<SqliteObserver>>,
     intake: Arc<Mutex<SqliteStore>>,
     version: String,
+    control: Arc<dyn StartControl>,
+}
+
+/// Foreground local launch supplied by the CLI composition root.
+pub trait StartControl: Send + Sync + 'static {
+    fn start(&self, id: &WorkId) -> Result<Work, AppError>;
 }
 
 /// Run the local API until the process receives an interrupt.
 pub fn serve(
     intake: SqliteStore,
     observer: SqliteObserver,
+    control: Arc<dyn StartControl>,
     port: u16,
     version: String,
 ) -> Result<(), AppError> {
@@ -46,6 +53,7 @@ pub fn serve(
             query: Arc::new(Mutex::new(observer)),
             intake: Arc::new(Mutex::new(intake)),
             version,
+            control,
         };
         let app = router(state);
         let ipv4 = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port))
@@ -67,6 +75,7 @@ fn router(state: ObserverState) -> Router {
         .route("/api/v0/overview", get(overview))
         .route("/api/v0/works", get(list_works).post(create_work))
         .route("/api/v0/works/{work_id}", get(show_work))
+        .route("/api/v0/works/{work_id}/start", post(start_work))
         .route("/api/v0/events", get(list_events))
         .route("/api/v0/events/stream", get(stream_events))
         .fallback(get(static_asset))
@@ -252,6 +261,19 @@ async fn show_work(
     let id = WorkId::parse(work_id).map_err(ApiError::bad_request)?;
     let work = with_query(&state, |query| query.get(&id))?
         .ok_or_else(|| ApiError::not_found("Work was not found"))?;
+    Ok(Json(work_response(&state, &work)?))
+}
+
+async fn start_work(
+    State(state): State<ObserverState>,
+    Path(work_id): Path<String>,
+) -> Result<Json<WorkResponse>, ApiError> {
+    let id = WorkId::parse(work_id).map_err(ApiError::bad_request)?;
+    let control = state.control.clone();
+    let work = tokio::task::spawn_blocking(move || control.start(&id))
+        .await
+        .map_err(|error| ApiError::internal(format!("start task failed: {error}")))?
+        .map_err(ApiError::from_start)?;
     Ok(Json(work_response(&state, &work)?))
 }
 
@@ -497,6 +519,18 @@ impl ApiError {
             other => Self::from(other),
         }
     }
+
+    fn from_start(error: AppError) -> Self {
+        match error {
+            AppError::NotFound(_) => Self::not_found(error.to_string()),
+            AppError::Conflict(_) | AppError::Domain(_) | AppError::OutcomeSchema(_) => Self {
+                status: StatusCode::CONFLICT,
+                code: "start_conflict",
+                message: error.to_string(),
+            },
+            other => Self::from(other),
+        }
+    }
 }
 
 impl From<AppError> for ApiError {
@@ -530,11 +564,20 @@ mod tests {
 
     use super::*;
 
+    struct DisabledStart;
+
+    impl StartControl for DisabledStart {
+        fn start(&self, id: &WorkId) -> Result<Work, AppError> {
+            Err(AppError::NotFound(id.clone()))
+        }
+    }
+
     fn observer_state(directory: &std::path::Path) -> ObserverState {
         ObserverState {
             query: Arc::new(Mutex::new(SqliteObserver::open(directory).unwrap())),
             intake: Arc::new(Mutex::new(SqliteStore::open(directory).unwrap())),
             version: "test".to_owned(),
+            control: Arc::new(DisabledStart),
         }
     }
 

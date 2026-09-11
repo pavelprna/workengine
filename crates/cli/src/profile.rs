@@ -3,12 +3,14 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, bail};
 use toml::Value;
 use workengine_adapters_worker::{Sandbox, SecretFile};
+use workengine_domain::{SecretRef, SecretSource};
 
 /// Worker profile loaded from configuration. Secrets are transient file references.
 #[derive(Debug)]
 pub struct ResolvedProfile {
     pub argv: Vec<String>,
     pub secret_files: Vec<SecretFile>,
+    pub secret_refs: Vec<SecretRef>,
     pub retry_limit: u32,
     pub checkout: Option<PathBuf>,
     pub sandbox: Sandbox,
@@ -62,8 +64,8 @@ pub fn resolve_profile(
     if prof.contains_key("env") {
         bail!("profile {name} env is unsupported in schema v2; use [profile.{name}.secret_file]");
     }
-    let secret_files = match prof.get("secret_file") {
-        None => Vec::new(),
+    let (secret_files, secret_refs) = match prof.get("secret_file") {
+        None => (Vec::new(), Vec::new()),
         Some(Value::Table(map)) => resolve_secret_files(name, map, getenv)?,
         Some(_) => bail!("profile {name} secret_file must be a table of fromEnv references"),
     };
@@ -71,6 +73,7 @@ pub fn resolve_profile(
     Ok(ResolvedProfile {
         argv,
         secret_files,
+        secret_refs,
         retry_limit,
         checkout,
         sandbox,
@@ -136,8 +139,9 @@ fn resolve_secret_files(
     profile: &str,
     map: &toml::Table,
     getenv: impl Fn(&str) -> Option<String>,
-) -> anyhow::Result<Vec<SecretFile>> {
-    let mut out = Vec::new();
+) -> anyhow::Result<(Vec<SecretFile>, Vec<SecretRef>)> {
+    let mut files = Vec::new();
+    let mut refs = Vec::new();
     for (key, value) in map {
         let Some(table) = value.as_table() else {
             bail!(
@@ -153,9 +157,13 @@ fn resolve_secret_files(
         let Some(val) = getenv(from) else {
             bail!("environment variable {from} is not set for profile {profile} secret_file.{key}");
         };
-        out.push(SecretFile::new(key.clone(), val).map_err(anyhow::Error::from)?);
+        files.push(SecretFile::new(key.clone(), val).map_err(anyhow::Error::from)?);
+        refs.push(SecretRef::new(
+            key.clone(),
+            SecretSource::environment_variable(from)?,
+        )?);
     }
-    Ok(out)
+    Ok((files, refs))
 }
 
 #[cfg(test)]

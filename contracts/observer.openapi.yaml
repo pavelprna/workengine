@@ -44,6 +44,17 @@ paths:
         '200': { description: Work snapshot, content: { application/json: { schema: { $ref: '#/components/schemas/WorkSnapshot' } } } }
         '400': { $ref: '#/components/responses/BadRequest' }
         '404': { $ref: '#/components/responses/NotFound' }
+  /api/v0/works/{workId}/start:
+    post:
+      operationId: startWork
+      description: Start ready or parked Work using its locally configured profile. The request carries no execution configuration and returns after the foreground launch reaches a confirmed terminal or parked result.
+      parameters:
+        - { name: workId, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Confirmed terminal or parked Work snapshot, content: { application/json: { schema: { $ref: '#/components/schemas/WorkSnapshot' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
   /api/v0/events:
     get:
       operationId: listEvents
@@ -70,6 +81,7 @@ components:
   responses:
     BadRequest: { description: Invalid request, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
     NotFound: { description: Resource not found, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    Conflict: { description: Work cannot be started or already has an active attempt, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
   schemas:
     CreateWorkRequest:
       type: object
