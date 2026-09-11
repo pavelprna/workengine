@@ -70,8 +70,9 @@ fn version_prints_package_version() {
     let output = bin().arg("version").output().unwrap();
     assert!(output.status.success());
     let line = stdout(&output);
-    assert!(line.starts_with("workengine 0.0.0"), "version line: {line}");
-    if let Some(rest) = line.strip_prefix("workengine 0.0.0")
+    let prefix = format!("workengine {}", env!("CARGO_PKG_VERSION"));
+    assert!(line.starts_with(&prefix), "version line: {line}");
+    if let Some(rest) = line.strip_prefix(&prefix)
         && !rest.is_empty()
     {
         assert!(
