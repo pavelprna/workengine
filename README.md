@@ -86,7 +86,11 @@ directories. Default: `.workengine`.
 never read SQLite directly. The UI can create `ready` Work and explicitly start
 `ready` or `parked` Work using its locally configured profile. It cannot supply
 argv, secrets, sandbox, workspace, or budget settings, and it cannot park,
-abort, or complete Work directly. The API remains intentionally internal.
+abort, or complete Work directly. Each Work record includes its immutable
+execution configuration, attempt/heartbeat/retry history, terminal diagnostics,
+redacted process metadata, and a finite catalogue of control-plane proof
+artifacts. Raw child output and workspace paths are not exposed. The API remains
+intentionally internal.
 
 `--config-dir` (or `WORKENGINE_CONFIG_DIR`) is a directory of Worker profiles:
 one `<profile>.toml` file per profile. That makes validation truly lazy: a bad

@@ -38,7 +38,7 @@ This document is the canonical behaviour of Worker. Keywords follow [RFC 2119](h
 - **[UNTESTED]** A Worker's permission profile MUST be deny-by-default. Extra rights require an explicit enable.
 - **[UNTESTED]** A Worker MUST NOT be able to perform known-destructive actions against the host environment (for example wipe paths outside its workspace).
 - **[TESTED]** A Worker MUST receive only the minimum resources and secrets required for that run. The runner clears its environment and materializes each declared reference in a transient `0600` file mounted read-only at `/run/secrets`; only the corresponding `NAME_FILE` path is in the Worker environment.
-- **[UNTESTED]** Secrets passed to a Worker MUST NOT leak through Workengine logs or process inspection surfaces that Workengine controls.
+- **[TESTED]** Secrets passed to a Worker MUST NOT leak through Workengine logs or process inspection surfaces that Workengine controls. Durable process records aggregate event kinds and counts; child stdout and stderr payloads are never persisted or returned by the observer.
 - **[UNTESTED]** Text from untrusted sources (inbound tickets, web, prior artifacts) MUST be treated as data, not as instructions to Workengine.
 
 ## Authorship

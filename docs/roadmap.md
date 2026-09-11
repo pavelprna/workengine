@@ -27,13 +27,17 @@ intake, and the embedded Web UI provides overview, a filterable paginated
 queue, Work detail and timeline, and the diagnostic boundary. The v0.3 operator
 slice adds explicit localhost launch through the same application path as the
 CLI, backed by an exclusive active-attempt lease and control-plane confirmed
-outcomes. External dependencies sit behind application ports. It does not yet
-have a daemon, complete crash ownership reconciliation, capture, external
-inbound sources, or publishers.
+outcomes. v0.4 completes observation with an execution ledger, attempt
+heartbeat and retry history, immutable configuration and runtime fingerprints,
+structured terminal diagnostics, bounded redacted process records, and a
+finite catalogue of control-plane proof artifacts. External dependencies sit
+behind application ports. It does not yet have a daemon, complete crash
+ownership reconciliation, capture, external inbound sources, or publishers.
 
 The sandboxed-attempt decision is accepted. Attempt IDs, immutable execution
 snapshots, per-Work active leases, and confirmed outcomes are present;
-protected control artifacts and checkpoint/abort supervision remain pending.
+protected Worker-writable control artifacts and checkpoint/abort supervision
+remain pending.
 See [ADR 0005](adr/0005-sandboxed-attempt-protocol.md).
 
 ## v0.1 — Observe and intake

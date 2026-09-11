@@ -85,7 +85,7 @@ control-plane operation, not a user command. Their rules:
 - **[TESTED]** A Work summary MUST be structured. Operators MUST NOT have to parse raw logs to know status.
 - **[TESTED]** Output of every Workengine-supervised subprocess, including the Worker, MUST use one streaming format.
 - **[TESTED]** Each record in that stream MUST carry a mandatory set of accounting fields, including `work_id`.
-- **[UNTESTED]** Navigation from a summary to raw artifacts MUST be a finite number of steps. Each significant step MUST leave a visible proof artifact.
+- **[TESTED]** Navigation from a summary to proof artifacts MUST be a finite number of steps. Each significant step MUST leave a visible proof artifact. The local observer catalogue exposes only control-plane execution specs, redacted process-record summaries, and confirmed outcomes; it does not provide arbitrary workspace navigation.
 
 ## Operator park notifications
 
