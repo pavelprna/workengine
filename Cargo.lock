@@ -1143,6 +1143,7 @@ dependencies = [
  "nix",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "workengine-application",
  "workengine-domain",
@@ -1152,6 +1153,7 @@ dependencies = [
 name = "workengine-adapters-workspace"
 version = "0.1.0"
 dependencies = [
+ "nix",
  "serde",
  "serde_json",
  "tempfile",
@@ -1174,6 +1176,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "nix",
  "rusqlite",
  "serde_json",
  "sha2",

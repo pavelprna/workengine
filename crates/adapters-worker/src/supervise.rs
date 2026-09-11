@@ -184,11 +184,14 @@ fn write_checkpoint_request(
         worker_profile: request.work.attributes().worker_profile(),
     };
     let bytes = serde_json::to_vec(&payload).map_err(AppError::worker)?;
-    fs::write(request.control_root.join("checkpoint-request.json"), bytes).map_err(AppError::worker)
+    crate::fs_safe::write(
+        &request.control_root.join("checkpoint-request.json"),
+        &bytes,
+    )
 }
 
 fn checkpoint_is_valid(request: &RunRequest<'_>) -> Result<bool, AppError> {
-    let bytes = match fs::read(request.control_root.join("checkpoint.json")) {
+    let bytes = match crate::fs_safe::read(&request.control_root.join("checkpoint.json")) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(AppError::worker(error)),
@@ -216,11 +219,10 @@ pub(crate) fn write_checkpoint_candidate(request: &RunRequest<'_>) -> Result<(),
         attempt_id: request.attempt_id.to_string(),
         worker_profile: request.work.attributes().worker_profile().to_owned(),
     };
-    fs::write(
-        request.control_root.join("checkpoint.json"),
-        serde_json::to_vec(&payload).map_err(AppError::worker)?,
+    crate::fs_safe::write(
+        &request.control_root.join("checkpoint.json"),
+        &serde_json::to_vec(&payload).map_err(AppError::worker)?,
     )
-    .map_err(AppError::worker)
 }
 
 fn drain_pipe<R: Read + Send + 'static>(
@@ -347,11 +349,10 @@ fn record_runtime_owner(request: &RunRequest<'_>, pid: u32) -> Result<(), AppErr
             process_group,
             start_ticks,
         };
-        fs::write(
-            request.control_root.join("runtime-owner.json"),
-            serde_json::to_vec(&owner).map_err(AppError::worker)?,
-        )
-        .map_err(AppError::worker)?;
+        crate::fs_safe::write(
+            &request.control_root.join("runtime-owner.json"),
+            &serde_json::to_vec(&owner).map_err(AppError::worker)?,
+        )?;
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -389,7 +390,7 @@ pub(crate) fn reclaim_runtime_owner(
 ) -> Result<bool, AppError> {
     #[cfg(target_os = "linux")]
     {
-        let bytes = match fs::read(control_root.join("runtime-owner.json")) {
+        let bytes = match crate::fs_safe::read(&control_root.join("runtime-owner.json")) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(error) => return Err(AppError::worker(error)),

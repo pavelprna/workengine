@@ -137,6 +137,28 @@ fn version_prints_package_version() {
 }
 
 #[test]
+fn digest_rootfs_reports_a_stable_content_digest() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("runtime"), "one").unwrap();
+    let first = bin()
+        .args(["digest-rootfs", "--rootfs", dir.path().to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(first.status.success());
+    let first = stdout(&first);
+    assert!(first.starts_with("sha256:"));
+    assert_eq!(first.len(), 71);
+
+    std::fs::write(dir.path().join("runtime"), "two").unwrap();
+    let second = bin()
+        .args(["digest-rootfs", "--rootfs", dir.path().to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(second.status.success());
+    assert_ne!(first, stdout(&second));
+}
+
+#[test]
 fn create_next_start_succeeds() {
     let dir = tempfile::tempdir().unwrap();
     let id = create_work(dir.path());

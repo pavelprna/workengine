@@ -68,13 +68,13 @@ impl WorkspaceFactory for DirWorkspaceFactory {
         if !existed && let Some(checkout) = request.checkout {
             copy_tree(checkout, &path)?;
         }
-        fs::write(path.join(GOAL_FILE), request.goal).map_err(AppError::workspace)?;
+        write_no_follow(&path.join(GOAL_FILE), request.goal.as_bytes())?;
         Ok(path)
     }
 
     fn read_artifact(&self, work_id: &WorkId) -> Result<Option<Vec<u8>>, AppError> {
         let path = self.dir(work_id).join("outcome.json");
-        match fs::read(&path) {
+        match read_no_follow(&path) {
             Ok(bytes) => Ok(Some(bytes)),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(err) => Err(AppError::workspace(err)),
@@ -95,11 +95,7 @@ impl WorkspaceFactory for DirWorkspaceFactory {
         if last_line(&path)?.as_deref() == Some(line.as_str()) {
             return Ok(());
         }
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .map_err(AppError::workspace)?;
+        let mut file = append_no_follow(&path)?;
         writeln!(file, "{line}").map_err(AppError::workspace)?;
         Ok(())
     }
@@ -135,6 +131,7 @@ impl WorkspaceFactory for DirWorkspaceFactory {
         input: &OperatorInput,
     ) -> Result<(), AppError> {
         let directory = self.dir(work_id).join(".workengine");
+        reject_symlink(&directory, "operator-input directory")?;
         fs::create_dir_all(&directory).map_err(AppError::workspace)?;
         restrict_directory(&directory)?;
         let path = directory.join("operator-inputs.jsonl");
@@ -150,11 +147,7 @@ impl WorkspaceFactory for DirWorkspaceFactory {
         if last_line(&path)?.as_deref() == Some(line.as_str()) {
             return Ok(());
         }
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .map_err(AppError::workspace)?;
+        let mut file = append_no_follow(&path)?;
         writeln!(file, "{line}").map_err(AppError::workspace)
     }
 }
@@ -167,6 +160,70 @@ fn restrict_directory(path: &Path) -> Result<(), AppError> {
             .map_err(AppError::workspace)?;
     }
     Ok(())
+}
+
+fn reject_symlink(path: &Path, label: &str) -> Result<(), AppError> {
+    match path.symlink_metadata() {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(AppError::workspace(format!(
+            "{label} must not be a symlink"
+        ))),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(AppError::workspace(error)),
+    }
+}
+
+fn no_follow(options: &mut OpenOptions) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK);
+    }
+}
+
+fn write_no_follow(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    no_follow(&mut options);
+    let mut file = options.open(path).map_err(AppError::workspace)?;
+    if !file.metadata().map_err(AppError::workspace)?.is_file() {
+        return Err(AppError::workspace(
+            "workspace control path is not a regular file",
+        ));
+    }
+    file.write_all(bytes).map_err(AppError::workspace)?;
+    file.sync_all().map_err(AppError::workspace)
+}
+
+fn append_no_follow(path: &Path) -> Result<std::fs::File, AppError> {
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).append(true);
+    no_follow(&mut options);
+    let file = options.open(path).map_err(AppError::workspace)?;
+    if !file.metadata().map_err(AppError::workspace)?.is_file() {
+        return Err(AppError::workspace(
+            "workspace control path is not a regular file",
+        ));
+    }
+    Ok(file)
+}
+
+fn read_no_follow(path: &Path) -> Result<Vec<u8>, std::io::Error> {
+    use std::io::Read;
+
+    let mut options = OpenOptions::new();
+    options.read(true);
+    no_follow(&mut options);
+    let mut file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "workspace control path is not a regular file",
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 fn copy_tree(src: &Path, dest: &Path) -> Result<(), AppError> {
@@ -221,8 +278,11 @@ fn encode_memory(
 }
 
 fn last_line(path: &Path) -> Result<Option<String>, AppError> {
-    match fs::read_to_string(path) {
-        Ok(text) => Ok(text.lines().next_back().map(str::to_owned)),
+    match read_no_follow(path) {
+        Ok(bytes) => {
+            let text = String::from_utf8(bytes).map_err(AppError::workspace)?;
+            Ok(text.lines().next_back().map(str::to_owned))
+        }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(err) => Err(AppError::workspace(err)),
     }
@@ -355,6 +415,45 @@ mod tests {
         let path = bind(&factory, &a, Some(&src)).unwrap();
         assert!(path.join("real.txt").exists());
         assert!(!path.join("link").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn control_plane_files_do_not_follow_worker_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().join("outside.txt");
+        fs::write(&outside, "protected").unwrap();
+        let factory = DirWorkspaceFactory::new(dir.path());
+        let id = WorkId::parse("work-links").unwrap();
+        let root = bind(&factory, &id, None).unwrap();
+
+        std::os::unix::fs::symlink(&outside, root.join("outcome.json")).unwrap();
+        assert!(factory.read_artifact(&id).is_err());
+
+        std::os::unix::fs::symlink(&outside, root.join("memory.log")).unwrap();
+        assert!(
+            factory
+                .record_memory(&id, WorkStatus::Failed, OutcomeKind::Failed)
+                .is_err()
+        );
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "protected");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn operator_input_directory_cannot_be_a_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let factory = DirWorkspaceFactory::new(dir.path());
+        let id = WorkId::parse("work-input-link").unwrap();
+        let root = bind(&factory, &id, None).unwrap();
+        std::os::unix::fs::symlink("/tmp", root.join(".workengine")).unwrap();
+        let input = OperatorInput {
+            id: 1,
+            kind: OperatorInputKind::Answer,
+            body: "data".to_owned(),
+            created_at_unix_ms: 1,
+        };
+        assert!(factory.record_operator_input(&id, &input).is_err());
     }
 
     #[test]

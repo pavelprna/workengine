@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 use workengine_adapters_http::{LifecycleControl, LocalClient, serve};
 use workengine_adapters_store::{SqliteObserver, SqliteStore};
 use workengine_adapters_worker::{
-    ProcessWorkerRunner, StubBehavior, StubWorkerRunner, reclaim_owned_process,
+    ProcessWorkerRunner, StubBehavior, StubWorkerRunner, digest_rootfs, reclaim_owned_process,
 };
 use workengine_adapters_workspace::DirWorkspaceFactory;
 use workengine_application::{
@@ -71,6 +71,11 @@ struct Cli {
 enum Command {
     /// Print the Workengine version
     Version,
+    /// Calculate the verified digest for a Bubblewrap runtime root
+    DigestRootfs {
+        #[arg(long)]
+        rootfs: PathBuf,
+    },
     /// Persist a new Work as ready
     Create {
         /// What this Work is for
@@ -168,6 +173,10 @@ fn run() -> anyhow::Result<u8> {
     match cli.command {
         Command::Version => {
             println!("{}", version_line());
+            Ok(0)
+        }
+        Command::DigestRootfs { rootfs } => {
+            println!("{}", digest_rootfs(&rootfs)?);
             Ok(0)
         }
         Command::Create { goal, profile } => {
@@ -447,7 +456,7 @@ impl LaunchOptions {
 
 enum AnyRunner {
     Stub(StubWorkerRunner),
-    Process(ProcessWorkerRunner),
+    Process(Box<ProcessWorkerRunner>),
 }
 
 impl workengine_application::WorkerRunner for AnyRunner {
@@ -529,34 +538,42 @@ fn select_runner(
         match profile::resolve_profile(&table, profile_name, |key| std::env::var(key).ok()) {
             Ok(resolved) => {
                 let config_material = format!(
-                    "argv={:?};sandbox={:?};secrets={:?}",
+                    "argv={:?};sandbox={:?};policy={:?};secrets={:?}",
                     resolved.argv,
                     resolved.sandbox,
+                    resolved.policy,
                     resolved
                         .secret_refs
                         .iter()
                         .map(|reference| (reference.name(), reference.source().reference()))
                         .collect::<Vec<_>>()
                 );
-                let runtime_material = format!("{:?}", resolved.sandbox);
-                let runtime_kind = match &resolved.sandbox {
-                    workengine_adapters_worker::Sandbox::Bubblewrap { .. } => {
-                        RuntimeKind::Bubblewrap
+                let (runtime_kind, runtime_digest) = match &resolved.sandbox {
+                    workengine_adapters_worker::Sandbox::Bubblewrap { rootfs_digest, .. } => (
+                        RuntimeKind::Bubblewrap,
+                        ContentDigest::parse(rootfs_digest)?,
+                    ),
+                    workengine_adapters_worker::Sandbox::Oci { image, .. } => {
+                        let digest = image
+                            .rsplit_once('@')
+                            .map(|(_, digest)| digest)
+                            .ok_or_else(|| anyhow::anyhow!("OCI image is not digest pinned"))?;
+                        (RuntimeKind::Oci, ContentDigest::parse(digest)?)
                     }
-                    workengine_adapters_worker::Sandbox::Oci { .. } => RuntimeKind::Oci,
                 };
-                let runner = ProcessWorkerRunner::new(
+                let runner = ProcessWorkerRunner::new_with_policy(
                     resolved.argv,
                     resolved.secret_files,
                     resolved.sandbox,
+                    resolved.policy,
                 )?;
                 return Ok(SelectedRunner {
-                    runner: AnyRunner::Process(runner),
+                    runner: AnyRunner::Process(Box::new(runner)),
                     retry_limit: retry_limit.unwrap_or(resolved.retry_limit),
                     checkout: checkout.or(resolved.checkout),
                     worker_config_digest: digest(config_material.as_bytes())?,
                     runtime_kind,
-                    runtime_digest: digest(runtime_material.as_bytes())?,
+                    runtime_digest,
                     secret_refs: resolved.secret_refs,
                 });
             }
@@ -616,17 +633,18 @@ fn open_store(data_dir: &std::path::Path, recover: bool) -> anyhow::Result<Sqlit
 fn acquire_daemon_lock(data_dir: &std::path::Path) -> Result<std::fs::File, AppError> {
     std::fs::create_dir_all(data_dir).map_err(AppError::store)?;
     let path = data_dir.join("daemon.lock");
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(&path)
-        .map_err(AppError::store)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).read(true).write(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(nix::libc::O_NOFOLLOW);
+    }
+    let file = options.open(&path).map_err(AppError::store)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
             .map_err(AppError::store)?;
     }
     file.try_lock().map_err(|error| {

@@ -9,11 +9,15 @@ use serde::{Deserialize, Serialize};
 use workengine_application::{AppError, ChannelReaction, RunRequest, WorkerExit, WorkerRunner};
 use workengine_domain::{OUTCOME_SCHEMA_VERSION, Outcome, OutcomeKind};
 
+mod fs_safe;
 mod process;
 mod stream;
 mod supervise;
 
-pub use process::{ProcessWorkerRunner, Sandbox, SecretFile};
+pub use process::{
+    EgressPolicy, ProcessWorkerRunner, ResourceLimits, Sandbox, SecretFile, WorkerPolicy,
+    digest_file, digest_rootfs,
+};
 pub use stream::{
     EVENT_CHILD_STDERR, EVENT_CHILD_STDOUT, EVENT_EXITED, EVENT_KILLED, EVENT_SPAWNED,
     STREAM_EVENTS, STREAM_SCHEMA_VERSION, record_line,
@@ -124,17 +128,18 @@ fn run_await_control(request: &mut RunRequest<'_>) -> Result<WorkerExit, AppErro
         "attemptId": request.attempt_id.as_str(),
         "workerProfile": request.work.attributes().worker_profile(),
     });
-    fs::write(
-        request.control_root.join(".checkpoint-payload.json"),
-        serde_json::to_vec(&candidate).map_err(AppError::worker)?,
-    )
-    .map_err(AppError::worker)?;
+    fs_safe::write(
+        &request.control_root.join(".checkpoint-payload.json"),
+        &serde_json::to_vec(&candidate).map_err(AppError::worker)?,
+    )?;
     let mut cmd = Command::new("sh");
     cmd.args([
         "-c",
         "while [ ! -f checkpoint-request.json ]; do sleep 0.01; done; cp .checkpoint-payload.json checkpoint.json; while :; do sleep 1; done",
     ])
-    .current_dir(request.control_root);
+    .current_dir(request.control_root)
+    .env_clear()
+    .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin");
     match spawn_supervised(cmd, request)? {
         ChildWait::Parked { control_request_id } => Ok(WorkerExit::Parked { control_request_id }),
         ChildWait::Aborted { control_request_id } => Ok(WorkerExit::Aborted { control_request_id }),
@@ -189,14 +194,17 @@ fn run_writer(
     let json = encode_outcome(&outcome)?;
     let dest = request.workspace_root.join("outcome.json");
     let payload = request.workspace_root.join(".outcome-payload.json");
-    fs::write(&payload, &json).map_err(AppError::worker)?;
+    fs_safe::write(&payload, json.as_bytes())?;
     let mut cmd = Command::new("sh");
     cmd.arg("-c")
         .arg("cp .outcome-payload.json outcome.json && printf '%s\\n' stub")
-        .current_dir(request.workspace_root);
+        .current_dir(request.workspace_root)
+        .env_clear()
+        .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin");
     match spawn_supervised(cmd, request)? {
         ChildWait::Exited { success: true } => {
-            decode_outcome(&fs::read(&dest).map_err(AppError::worker)?).map(WorkerExit::Completed)
+            decode_outcome(&fs_safe::read(&dest).map_err(AppError::worker)?)
+                .map(WorkerExit::Completed)
         }
         ChildWait::Exited { success: false } => {
             Err(AppError::worker("stub worker exited unsuccessfully"))
@@ -213,7 +221,7 @@ fn run_writer(
 fn persist_outcome(root: &Path, kind: OutcomeKind, profile: &str) -> Result<Outcome, AppError> {
     let outcome = Outcome::new(OUTCOME_SCHEMA_VERSION, kind, profile).map_err(AppError::from)?;
     let json = encode_outcome(&outcome)?;
-    fs::write(root.join("outcome.json"), json).map_err(AppError::worker)?;
+    fs_safe::write(&root.join("outcome.json"), json.as_bytes())?;
     Ok(outcome)
 }
 
@@ -222,7 +230,9 @@ fn run_budget(request: &mut RunRequest<'_>, profile: &str) -> Result<WorkerExit,
     let mut cmd = Command::new("sh");
     cmd.arg("-c")
         .arg("exec sleep 30")
-        .current_dir(request.workspace_root);
+        .current_dir(request.workspace_root)
+        .env_clear()
+        .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin");
     match spawn_supervised(cmd, request)? {
         ChildWait::BudgetExceeded => {
             persist_outcome(request.workspace_root, OutcomeKind::BudgetExceeded, profile)
@@ -239,7 +249,9 @@ fn run_hang(request: &mut RunRequest<'_>, profile: &str) -> Result<WorkerExit, A
     let mut cmd = Command::new("sh");
     cmd.arg("-c")
         .arg("sleep 30 & echo $! > child.pid; exec sleep 30")
-        .current_dir(request.workspace_root);
+        .current_dir(request.workspace_root)
+        .env_clear()
+        .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin");
     match spawn_supervised(cmd, request)? {
         ChildWait::BudgetExceeded => {
             persist_outcome(request.workspace_root, OutcomeKind::TimedOut, profile)

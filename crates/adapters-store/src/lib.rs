@@ -220,9 +220,12 @@ pub struct SqliteObserver {
 impl SqliteStore {
     pub fn open(data_dir: impl AsRef<Path>) -> Result<Self, AppError> {
         let data_dir = data_dir.as_ref();
+        reject_symlink(data_dir, "data directory")?;
         std::fs::create_dir_all(data_dir).map_err(AppError::store)?;
         restrict_directory(data_dir)?;
         let database = data_dir.join("workengine.sqlite");
+        reject_symlink(&database, "store database")?;
+        reject_sqlite_sidecar_symlinks(&database)?;
         let conn = Connection::open(&database).map_err(AppError::store)?;
         restrict_file(&database)?;
         conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")
@@ -262,12 +265,34 @@ impl SqliteStore {
 impl SqliteObserver {
     pub fn open(data_dir: impl AsRef<Path>) -> Result<Self, AppError> {
         let database = data_dir.as_ref().join("workengine.sqlite");
+        reject_symlink(&database, "store database")?;
+        reject_sqlite_sidecar_symlinks(&database)?;
         let conn = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY)
             .map_err(AppError::store)?;
         conn.execute_batch("PRAGMA query_only = ON; PRAGMA foreign_keys = ON;")
             .map_err(AppError::store)?;
         Ok(Self { conn })
     }
+}
+
+fn reject_symlink(path: &Path, label: &str) -> Result<(), AppError> {
+    match path.symlink_metadata() {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err(AppError::store(format!("{label} must not be a symlink")))
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(AppError::store(error)),
+    }
+}
+
+fn reject_sqlite_sidecar_symlinks(database: &Path) -> Result<(), AppError> {
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let mut sidecar = database.as_os_str().to_owned();
+        sidecar.push(suffix);
+        reject_symlink(Path::new(&sidecar), "store sidecar")?;
+    }
+    Ok(())
 }
 
 fn events_after_connection(
@@ -1928,5 +1953,16 @@ mod tests {
         let all = store.events_after(0, Some(work.id())).unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(store.events_after(all[0].seq, None).unwrap().len(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn store_database_does_not_follow_a_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().join("outside.sqlite");
+        std::fs::write(&outside, "protected").unwrap();
+        std::os::unix::fs::symlink(&outside, dir.path().join("workengine.sqlite")).unwrap();
+        assert!(SqliteStore::open(dir.path()).is_err());
+        assert_eq!(std::fs::read_to_string(outside).unwrap(), "protected");
     }
 }
