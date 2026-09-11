@@ -10,9 +10,12 @@ Trait signatures below are intent, not frozen Rust. The crate is the API. Behavi
 
 ## WorkQuery and WorkStore
 
-`WorkQuery` reads current Work and its sequenced immutable events. It has no
-transition or recovery operation. `WorkStore` extends it with the atomic
-status-plus-event write used by control-plane use cases.
+`WorkQuery` reads current Work, its sequenced immutable events, and a typed
+execution/attempt observation projection. It has no transition or recovery
+operation. `WorkStore` extends it with the atomic status-plus-event write used
+by control-plane use cases. `AttemptRecorder` is the narrow live-observation
+port used by a supervised Worker to record heartbeat and payload-free process
+metadata against the matching active lease.
 
 Persists current Work status and the append-only event log.
 

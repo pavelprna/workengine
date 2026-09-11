@@ -72,6 +72,8 @@ These are not SemVer surfaces and not architecture. Canon for commits is `CONTRI
 | F29 | HTTP overview is calculated from one read-only snapshot; resumable event cursors are exclusive and `Last-Event-ID` wins over query input | HTTP integration test | enforced |
 | F30 | Execution and attempt ids are distinct types; execution specs are immutable, contain references rather than secret values, and confirmed outcomes bind both ids | domain types and unit tests | enforced |
 | F31 | CLI and localhost HTTP start use one application path; only one active attempt can claim a Work and the browser cannot provide execution configuration | application, store, HTTP, and CLI tests | enforced |
+| F32 | Execution observation is read-only, typed, and finite from Work summary to control-plane proof artifacts | store and HTTP integration tests | enforced |
+| F33 | Attempt heartbeat and process records require the matching active lease; child stdout/stderr payloads are never persisted or returned | worker, store, and HTTP integration tests | enforced |
 
 ## How to add a check
 
