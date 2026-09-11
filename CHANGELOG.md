@@ -7,6 +7,36 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 Release Please generates released sections from Conventional Commits; humans add
 context only when the generated notes would be misleading or incomplete.
 
+## [0.2.0](https://github.com/pavelprna/workengine/compare/v0.1.0...v0.2.0) (2026-09-11)
+
+
+### Added
+
+* **application:** add execution observation ports ([f3cc63f](https://github.com/pavelprna/workengine/commit/f3cc63f8749e8003d38c7933c98e1c8787e227cc))
+* **application:** add project queues and integration boundaries ([1da426f](https://github.com/pavelprna/workengine/commit/1da426fd0cf0bc27503ea55b1070a0817f39984a))
+* **cli:** add lease-protected operator launch ([3106047](https://github.com/pavelprna/workengine/commit/3106047c5f3b63044a25f8222757a44e59e3fffc))
+* **cli:** add local Work intake ([f0dad8e](https://github.com/pavelprna/workengine/commit/f0dad8eee55c0bbd5e2c1a74ef06f8d5a52a2c4a))
+* **cli:** add v0.4 execution ledger UI ([cb9fecc](https://github.com/pavelprna/workengine/commit/cb9fecce4eddb2f0cb9264ec6f32173309b34be9))
+* **cli:** add v0.5 live operator daemon ([9f1af46](https://github.com/pavelprna/workengine/commit/9f1af46816885ce92a196f32c5169817685d0ddd))
+* **cli:** add Work queue interface ([2f45b32](https://github.com/pavelprna/workengine/commit/2f45b327236c0912eae80f8ce144f2851d50ff0f))
+* **cli:** expose explicit Work launch in browser ([37e233d](https://github.com/pavelprna/workengine/commit/37e233d3e37782434de99fc4dd4fbd8d740b27e9))
+* **cli:** serve execution observation flow ([8b64151](https://github.com/pavelprna/workengine/commit/8b64151f6365ede2d58f3581715a324289d1a628))
+* **domain:** add durable execution vocabulary ([66d63cf](https://github.com/pavelprna/workengine/commit/66d63cf6a6d7a4391214d70d075439979269c816))
+* **domain:** add runtime kind to execution spec ([2e32ce8](https://github.com/pavelprna/workengine/commit/2e32ce804b6c21a2439f65a511e123a4c9052b94))
+* **spec:** expose execution observation API ([ad0ee27](https://github.com/pavelprna/workengine/commit/ad0ee27a30c4cea76f004f159f9a3b5e11c9a88a))
+* **store:** persist execution observations ([831d2b4](https://github.com/pavelprna/workengine/commit/831d2b45718d8d840f59e0b9374f292ad442ef6e))
+* **worker:** enforce v0.6 runtime policy ([bb54f55](https://github.com/pavelprna/workengine/commit/bb54f556f42adf87637fa6d6ccacae421d15529d))
+* **worker:** record payload-free process observations ([3d19ed0](https://github.com/pavelprna/workengine/commit/3d19ed0999c9e8c686cc08df57a609383a14f5d4))
+
+
+### Documentation
+
+* **adr:** define execution and attempt identity ([e84343c](https://github.com/pavelprna/workengine/commit/e84343cbfd781cc6ee6cfcc1b6c1b5645e7d3333))
+* **adr:** document v0.3 operator launch ([253a653](https://github.com/pavelprna/workengine/commit/253a6536c399915f8d2c68cae3cdff95dfa1f310))
+* **adr:** record observable execution projection ([aabae8b](https://github.com/pavelprna/workengine/commit/aabae8bc568f08a1460e55e61ffef2a5aefbb36d))
+* **adr:** record v0.6 worker policy ([79dcc16](https://github.com/pavelprna/workengine/commit/79dcc16fa341d21a6ee509e9f5047ea776735a44))
+* **spec:** document v0.4 observation surface ([505d036](https://github.com/pavelprna/workengine/commit/505d03670ef3f866f5ef2eb0f52b45d23bf062b3))
+
 ## 0.1.0 (2026-09-11)
 
 
