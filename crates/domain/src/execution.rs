@@ -27,6 +27,26 @@ impl ChannelPolicy {
     }
 }
 
+/// Runtime boundary selected once for an immutable execution.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuntimeKind {
+    Stub,
+    Bubblewrap,
+    Oci,
+}
+
+impl RuntimeKind {
+    pub const ALL: [Self; 3] = [Self::Stub, Self::Bubblewrap, Self::Oci];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Stub => "stub",
+            Self::Bubblewrap => "bubblewrap",
+            Self::Oci => "oci",
+        }
+    }
+}
+
 /// A content-addressed SHA-256 digest persisted in an execution snapshot.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct ContentDigest(String);
@@ -115,6 +135,7 @@ pub struct ExecutionSpec {
     work_id: WorkId,
     worker_profile: String,
     worker_config_digest: ContentDigest,
+    runtime_kind: RuntimeKind,
     runtime_digest: ContentDigest,
     wall_clock_budget_ms: u64,
     retry_limit: u32,
@@ -129,6 +150,7 @@ impl ExecutionSpec {
         work_id: WorkId,
         worker_profile: impl Into<String>,
         worker_config_digest: ContentDigest,
+        runtime_kind: RuntimeKind,
         runtime_digest: ContentDigest,
         wall_clock_budget_ms: u64,
         retry_limit: u32,
@@ -151,6 +173,7 @@ impl ExecutionSpec {
             work_id,
             worker_profile,
             worker_config_digest,
+            runtime_kind,
             runtime_digest,
             wall_clock_budget_ms,
             retry_limit,
@@ -173,6 +196,10 @@ impl ExecutionSpec {
 
     pub fn worker_config_digest(&self) -> &ContentDigest {
         &self.worker_config_digest
+    }
+
+    pub fn runtime_kind(&self) -> RuntimeKind {
+        self.runtime_kind
     }
 
     pub fn runtime_digest(&self) -> &ContentDigest {
@@ -277,6 +304,7 @@ mod tests {
             WorkId::parse("work-1").unwrap(),
             "stub",
             ContentDigest::parse(CONFIG_DIGEST).unwrap(),
+            RuntimeKind::Stub,
             ContentDigest::parse(RUNTIME_DIGEST).unwrap(),
             5_000,
             2,
@@ -298,6 +326,7 @@ mod tests {
         assert_eq!(spec.work_id().as_str(), "work-1");
         assert_eq!(spec.worker_profile(), "stub");
         assert_eq!(spec.worker_config_digest().as_str(), CONFIG_DIGEST);
+        assert_eq!(spec.runtime_kind(), RuntimeKind::Stub);
         assert_eq!(spec.runtime_digest().as_str(), RUNTIME_DIGEST);
         assert_eq!(spec.wall_clock_budget_ms(), 5_000);
         assert_eq!(spec.retry_limit(), 2);
@@ -312,6 +341,7 @@ mod tests {
             WorkId::parse("work-1").unwrap(),
             "stub",
             ContentDigest::parse(CONFIG_DIGEST).unwrap(),
+            RuntimeKind::Stub,
             ContentDigest::parse(RUNTIME_DIGEST).unwrap(),
             5_000,
             0,

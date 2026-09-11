@@ -17,7 +17,7 @@ pub use error::DomainError;
 pub use event::{EVENT_SCHEMA_VERSION, EventKind, WorkEvent, replay};
 pub use execution::{
     CONFIRMED_OUTCOME_SCHEMA_VERSION, ChannelPolicy, ConfirmedOutcome, ContentDigest,
-    EXECUTION_SPEC_SCHEMA_VERSION, ExecutionSpec, SecretRef, SecretSource,
+    EXECUTION_SPEC_SCHEMA_VERSION, ExecutionSpec, RuntimeKind, SecretRef, SecretSource,
 };
 pub use execution_id::ExecutionId;
 pub use outcome::{OUTCOME_SCHEMA_VERSION, Outcome, OutcomeKind};
