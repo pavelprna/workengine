@@ -87,7 +87,7 @@ enum Command {
         #[arg(long)]
         work: Option<String>,
     },
-    /// Serve the local read-only Web observer
+    /// Serve the local Web operator intake and observer
     Serve {
         /// Localhost TCP port for the Web observer
         #[arg(long, default_value_t = DEFAULT_SERVE_PORT)]
@@ -176,9 +176,10 @@ fn run() -> anyhow::Result<u8> {
         }
         Command::Serve { port } => {
             // Initialize a fresh local store if needed, but never recover Work.
-            let _store = SqliteStore::open(&data_dir)?;
+            // The HTTP adapter uses this writer only for explicit operator intake.
+            let store = SqliteStore::open(&data_dir)?;
             let observer = SqliteObserver::open(&data_dir)?;
-            serve(observer, port, version_line())?;
+            serve(store, observer, port, version_line())?;
             Ok(0)
         }
         Command::Start { work, checkout } => {

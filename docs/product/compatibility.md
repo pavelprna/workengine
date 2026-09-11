@@ -34,7 +34,7 @@ Changing these is not a SemVer break.
 | JSON key order | Parsers MUST NOT depend on order |
 | Internal crate and module names | `workengine-domain` is not a public library API |
 | Adapter internals, SQL without `schemaVersion` | Private |
-| `/api/v0` observer API and `contracts/observer.openapi.yaml` | Explicitly internal until durable execution permits a public v1 |
+| `/api/v0` local API and `contracts/observer.openapi.yaml` | Explicitly internal until durable execution permits a public v1 |
 | Help wording, man page prose | Behaviour and flags matter |
 | Worker profile names (delivery phases) | Configuration, versioned separately from the core |
 

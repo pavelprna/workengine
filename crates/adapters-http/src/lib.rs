@@ -1,4 +1,4 @@
-//! Localhost-only, read-only HTTP observer adapter.
+//! Localhost-only HTTP adapter for operator intake and observation.
 
 use std::convert::Infallible;
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -13,8 +13,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
-use workengine_adapters_store::SqliteObserver;
-use workengine_application::{AppError, SequencedEvent, WorkQuery};
+use workengine_adapters_store::{SqliteObserver, SqliteStore};
+use workengine_application::{AppError, SequencedEvent, SystemClock, WorkQuery, create};
 use workengine_domain::{Work, WorkEvent, WorkId, WorkStatus};
 
 include!(concat!(env!("OUT_DIR"), "/web_assets.rs"));
@@ -26,11 +26,17 @@ const CSP: &str = "default-src 'self'; base-uri 'none'; object-src 'none'; frame
 #[derive(Clone)]
 struct ObserverState {
     query: Arc<Mutex<SqliteObserver>>,
+    intake: Arc<Mutex<SqliteStore>>,
     version: String,
 }
 
-/// Run the observer until the process receives an interrupt.
-pub fn serve(observer: SqliteObserver, port: u16, version: String) -> Result<(), AppError> {
+/// Run the local API until the process receives an interrupt.
+pub fn serve(
+    intake: SqliteStore,
+    observer: SqliteObserver,
+    port: u16,
+    version: String,
+) -> Result<(), AppError> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -38,6 +44,7 @@ pub fn serve(observer: SqliteObserver, port: u16, version: String) -> Result<(),
     runtime.block_on(async move {
         let state = ObserverState {
             query: Arc::new(Mutex::new(observer)),
+            intake: Arc::new(Mutex::new(intake)),
             version,
         };
         let app = router(state);
@@ -57,7 +64,8 @@ pub fn serve(observer: SqliteObserver, port: u16, version: String) -> Result<(),
 fn router(state: ObserverState) -> Router {
     Router::new()
         .route("/api/v0/health", get(health))
-        .route("/api/v0/works", get(list_works))
+        .route("/api/v0/overview", get(overview))
+        .route("/api/v0/works", get(list_works).post(create_work))
         .route("/api/v0/works/{work_id}", get(show_work))
         .route("/api/v0/events", get(list_events))
         .route("/api/v0/events/stream", get(stream_events))
@@ -71,6 +79,22 @@ struct HealthResponse {
     status: &'static str,
     version: String,
     store: &'static str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OverviewResponse {
+    total_works: usize,
+    status_counts: StatusCounts,
+}
+
+#[derive(Serialize)]
+struct StatusCounts {
+    ready: usize,
+    running: usize,
+    succeeded: usize,
+    failed: usize,
+    parked: usize,
 }
 
 #[derive(Serialize)]
@@ -120,6 +144,13 @@ struct WorksParams {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CreateWorkRequest {
+    goal: String,
+    worker_profile: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct EventsParams {
     after: Option<String>,
     #[serde(rename = "workId")]
@@ -134,6 +165,46 @@ async fn health(State(state): State<ObserverState>) -> Result<Json<HealthRespons
         version: state.version,
         store: "readable",
     }))
+}
+
+async fn overview(State(state): State<ObserverState>) -> Result<Json<OverviewResponse>, ApiError> {
+    let works = with_query(&state, |query| query.list())?;
+    let mut status_counts = StatusCounts {
+        ready: 0,
+        running: 0,
+        succeeded: 0,
+        failed: 0,
+        parked: 0,
+    };
+    for work in &works {
+        match work.status() {
+            WorkStatus::Ready => status_counts.ready += 1,
+            WorkStatus::Running => status_counts.running += 1,
+            WorkStatus::Succeeded => status_counts.succeeded += 1,
+            WorkStatus::Failed => status_counts.failed += 1,
+            WorkStatus::Parked => status_counts.parked += 1,
+        }
+    }
+    Ok(Json(OverviewResponse {
+        total_works: works.len(),
+        status_counts,
+    }))
+}
+
+async fn create_work(
+    State(state): State<ObserverState>,
+    Json(request): Json<CreateWorkRequest>,
+) -> Result<(StatusCode, Json<WorkResponse>), ApiError> {
+    let work = with_intake(&state, |store| {
+        create(
+            store,
+            &SystemClock,
+            request.goal,
+            request.worker_profile.unwrap_or_else(|| "stub".to_owned()),
+        )
+    })
+    .map_err(ApiError::from_create)?;
+    Ok((StatusCode::CREATED, Json(work_response(&state, &work)?)))
 }
 
 async fn list_works(
@@ -217,10 +288,7 @@ async fn stream_events(
     headers: HeaderMap,
     Query(params): Query<EventsParams>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let header_cursor = headers
-        .get("last-event-id")
-        .and_then(|value| value.to_str().ok());
-    let mut cursor = parse_event_cursor(header_cursor.or(params.after.as_deref()))?;
+    let mut cursor = stream_start_cursor(&headers, &params)?;
     let work_id = params
         .work_id
         .as_deref()
@@ -255,6 +323,13 @@ async fn stream_events(
             .interval(Duration::from_secs(15))
             .text("keep-alive"),
     ))
+}
+
+fn stream_start_cursor(headers: &HeaderMap, params: &EventsParams) -> Result<u64, ApiError> {
+    let header_cursor = headers
+        .get("last-event-id")
+        .and_then(|value| value.to_str().ok());
+    parse_event_cursor(header_cursor.or(params.after.as_deref()))
 }
 
 async fn static_asset(uri: Uri) -> Response {
@@ -305,6 +380,17 @@ fn with_query<T>(
         .lock()
         .map_err(|_| ApiError::internal("observer query lock poisoned"))?;
     operation(&query).map_err(ApiError::from)
+}
+
+fn with_intake<T>(
+    state: &ObserverState,
+    operation: impl FnOnce(&mut SqliteStore) -> Result<T, AppError>,
+) -> Result<T, AppError> {
+    let mut intake = state
+        .intake
+        .lock()
+        .map_err(|_| AppError::store("operator intake lock poisoned"))?;
+    operation(&mut intake)
 }
 
 fn work_response(state: &ObserverState, work: &Work) -> Result<WorkResponse, ApiError> {
@@ -404,6 +490,13 @@ impl ApiError {
             message: message.into(),
         }
     }
+
+    fn from_create(error: AppError) -> Self {
+        match error {
+            AppError::Domain(_) => Self::bad_request(error),
+            other => Self::from(other),
+        }
+    }
 }
 
 impl From<AppError> for ApiError {
@@ -429,15 +522,38 @@ impl IntoResponse for ApiError {
 mod tests {
     use axum::body::{Body, to_bytes};
     use axum::http::Request;
+    use serde_json::Value;
     use tower::ServiceExt;
     use workengine_adapters_store::SqliteStore;
     use workengine_application::{SystemClock, WorkStore, create};
-    use workengine_domain::{WorkEvent, WorkStatus};
+    use workengine_domain::{Work, WorkAttributes, WorkEvent, WorkId, WorkStatus};
 
     use super::*;
 
+    fn observer_state(directory: &std::path::Path) -> ObserverState {
+        ObserverState {
+            query: Arc::new(Mutex::new(SqliteObserver::open(directory).unwrap())),
+            intake: Arc::new(Mutex::new(SqliteStore::open(directory).unwrap())),
+            version: "test".to_owned(),
+        }
+    }
+
+    fn ready_work(id: &str, goal: &str, profile: &str, created_at: u64) -> Work {
+        Work::new(
+            WorkId::parse(id).unwrap(),
+            WorkAttributes::new(goal, profile).unwrap(),
+            created_at,
+        )
+        .unwrap()
+    }
+
+    async fn json(response: Response) -> Value {
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
     #[tokio::test]
-    async fn observer_routes_are_read_only_and_hide_workspace_paths() {
+    async fn local_api_intake_is_durable_and_observation_hides_workspace_paths() {
         let directory = tempfile::tempdir().unwrap();
         let mut store = SqliteStore::open(directory.path()).unwrap();
         let work = create(&mut store, &SystemClock, "inspect safely", "stub").unwrap();
@@ -451,10 +567,7 @@ mod tests {
             .unwrap();
         drop(store);
 
-        let state = ObserverState {
-            query: Arc::new(Mutex::new(SqliteObserver::open(directory.path()).unwrap())),
-            version: "test".to_owned(),
-        };
+        let state = observer_state(directory.path());
         let app = router(state.clone());
 
         let health = app
@@ -463,6 +576,60 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(health.status(), StatusCode::OK);
+
+        let created = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v0/works")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"goal":"make the queue visible","workerProfile":"stub"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let created = json(created).await;
+        let created_id = created["workId"].as_str().unwrap();
+        assert_eq!(created["status"], "ready");
+        assert_eq!(created["goal"], "make the queue visible");
+        assert_eq!(created["workerProfile"], "stub");
+        assert_eq!(created["workspaceBound"], false);
+
+        let default_profile = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v0/works")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"goal":"use the default profile"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(default_profile.status(), StatusCode::CREATED);
+        let default_profile = json(default_profile).await;
+        assert_eq!(default_profile["workerProfile"], "stub");
+
+        let forbidden = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v0/works")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"goal":"cannot set a workspace","workspaceRoot":"/tmp"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(forbidden.status(), StatusCode::UNPROCESSABLE_ENTITY);
 
         let works = app
             .clone()
@@ -504,6 +671,208 @@ mod tests {
         let after = query.get(work.id()).unwrap().unwrap();
         assert_eq!(after.status(), WorkStatus::Running);
         assert_eq!(query.events(work.id()).unwrap().len(), 2);
+        let created_id = WorkId::parse(created_id).unwrap();
+        let created_events = query.events(&created_id).unwrap();
+        assert_eq!(created_events.len(), 1);
+        assert_eq!(created_events[0].kind().as_str(), "created");
+        assert_eq!(query.list().unwrap().len(), 3);
+        drop(query);
+
+        let second_observer = SqliteObserver::open(directory.path()).unwrap();
+        assert_eq!(
+            second_observer.get(&created_id).unwrap().unwrap().status(),
+            WorkStatus::Ready
+        );
+    }
+
+    #[tokio::test]
+    async fn overview_filters_and_work_cursor_are_stable() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = SqliteStore::open(directory.path()).unwrap();
+        for (id, goal, profile, created_at) in [
+            ("work-a", "old", "stub", 10),
+            ("work-b", "same timestamp one", "writer", 20),
+            ("work-c", "same timestamp two", "writer", 20),
+            ("work-d", "newest", "stub", 30),
+        ] {
+            let work = ready_work(id, goal, profile, created_at);
+            store.put(&work, WorkEvent::created(&work)).unwrap();
+        }
+        drop(store);
+        let app = router(observer_state(directory.path()));
+
+        let overview = app
+            .clone()
+            .oneshot(
+                Request::get("/api/v0/overview")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let overview = json(overview).await;
+        assert_eq!(overview["totalWorks"], 4);
+        assert_eq!(overview["statusCounts"]["ready"], 4);
+        assert_eq!(overview["statusCounts"]["running"], 0);
+
+        let first = app
+            .clone()
+            .oneshot(
+                Request::get("/api/v0/works?profile=writer&limit=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let first = json(first).await;
+        assert_eq!(first["items"][0]["workId"], "work-c");
+        assert_eq!(first["nextCursor"], "20:work-c");
+
+        let second = app
+            .clone()
+            .oneshot(
+                Request::get("/api/v0/works?profile=writer&limit=1&cursor=20%3Awork-c")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let second = json(second).await;
+        assert_eq!(second["items"][0]["workId"], "work-b");
+        assert!(second["nextCursor"].is_null());
+
+        for path in [
+            "/api/v0/works?status=unknown",
+            "/api/v0/works?limit=0",
+            "/api/v0/works?cursor=not-a-cursor",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(Request::get(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn observers_replay_events_without_mutating_work_or_duplicates() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = SqliteStore::open(directory.path()).unwrap();
+        let work = ready_work("work-observed", "observe safely", "stub", 10);
+        store.put(&work, WorkEvent::created(&work)).unwrap();
+        let mut running = work.clone();
+        running.start().unwrap();
+        store
+            .put(
+                &running,
+                WorkEvent::started(&running, WorkStatus::Ready, 11),
+            )
+            .unwrap();
+        drop(store);
+
+        let state = observer_state(directory.path());
+        let first_observer = router(state.clone());
+        let second_observer = router(state.clone());
+        for app in [&first_observer, &second_observer] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::get("/api/v0/works/work-observed")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let snapshot = json(response).await;
+            assert_eq!(snapshot["status"], "running");
+        }
+
+        let first_page = first_observer
+            .clone()
+            .oneshot(
+                Request::get("/api/v0/events?workId=work-observed&limit=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let first_page = json(first_page).await;
+        assert_eq!(first_page["items"][0]["cursor"], "1");
+        assert_eq!(first_page["nextCursor"], "1");
+
+        let resumed = second_observer
+            .clone()
+            .oneshot(
+                Request::get("/api/v0/events?workId=work-observed&after=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let resumed = json(resumed).await;
+        assert_eq!(resumed["items"][0]["cursor"], "2");
+        assert_eq!(resumed["items"].as_array().unwrap().len(), 1);
+
+        let query = state.query.lock().unwrap();
+        assert_eq!(
+            query.get(work.id()).unwrap().unwrap().status(),
+            WorkStatus::Running
+        );
+        assert_eq!(query.events(work.id()).unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn embedded_ui_uses_spa_fallback_without_masking_api_404s() {
+        let directory = tempfile::tempdir().unwrap();
+        drop(SqliteStore::open(directory.path()).unwrap());
+        let app = router(observer_state(directory.path()));
+
+        let page = app
+            .clone()
+            .oneshot(
+                Request::get("/works/work-from-a-direct-url")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.status(), StatusCode::OK);
+        assert_eq!(
+            page.headers()[header::CONTENT_TYPE],
+            "text/html; charset=utf-8"
+        );
+        assert_eq!(page.headers()[header::CONTENT_SECURITY_POLICY], CSP);
+
+        let missing_api = app
+            .oneshot(
+                Request::get("/api/v0/not-a-route")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing_api.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            missing_api.headers()[header::CONTENT_TYPE],
+            "application/json"
+        );
+    }
+
+    #[test]
+    fn stream_cursor_prefers_last_event_id_and_is_exclusive() {
+        let params = EventsParams {
+            after: Some("1".to_owned()),
+            work_id: None,
+            limit: None,
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("last-event-id", HeaderValue::from_static("2"));
+        assert!(matches!(stream_start_cursor(&headers, &params), Ok(2)));
+        headers.insert("last-event-id", HeaderValue::from_static("bad"));
+        assert!(stream_start_cursor(&headers, &params).is_err());
+        headers.clear();
+        assert!(matches!(stream_start_cursor(&headers, &params), Ok(1)));
     }
 
     #[test]

@@ -1,24 +1,39 @@
 openapi: 3.1.0
 info:
-  title: Workengine Observer API
+  title: Workengine Local API
   version: 0.1.0-internal
-  description: Localhost-only, read-only observer API. Internal until a public v1 is explicitly adopted.
+  description: Localhost-only operator-intake and observer API. Internal until a public v1 is explicitly adopted.
 paths:
   /api/v0/health:
     get:
       operationId: getHealth
       responses:
         '200': { description: Healthy observer, content: { application/json: { schema: { $ref: '#/components/schemas/Health' } } } }
+  /api/v0/overview:
+    get:
+      operationId: getOverview
+      responses:
+        '200': { description: Exact Work counts from one read-only snapshot, content: { application/json: { schema: { $ref: '#/components/schemas/Overview' } } } }
   /api/v0/works:
+    post:
+      operationId: createWork
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { $ref: '#/components/schemas/CreateWorkRequest' } }
+      responses:
+        '201': { description: Durable ready Work, content: { application/json: { schema: { $ref: '#/components/schemas/WorkSnapshot' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '422': { $ref: '#/components/responses/BadRequest' }
     get:
       operationId: listWorks
       parameters:
         - { name: status, in: query, schema: { type: string, enum: [ready, running, succeeded, failed, parked] } }
         - { name: profile, in: query, schema: { type: string } }
-        - { name: cursor, in: query, schema: { type: string } }
+        - { name: cursor, in: query, description: Opaque, exclusive cursor for the newest-first order., schema: { type: string } }
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 50 } }
       responses:
-        '200': { description: Work page, content: { application/json: { schema: { $ref: '#/components/schemas/WorkPage' } } } }
+        '200': { description: Work page ordered newest-first, content: { application/json: { schema: { $ref: '#/components/schemas/WorkPage' } } } }
         '400': { $ref: '#/components/responses/BadRequest' }
   /api/v0/works/{workId}:
     get:
@@ -33,17 +48,17 @@ paths:
     get:
       operationId: listEvents
       parameters:
-        - { name: after, in: query, schema: { type: string, pattern: '^[0-9]+$', default: '0' } }
+        - { name: after, in: query, description: Exclusive event cursor., schema: { type: string, pattern: '^[0-9]+$', default: '0' } }
         - { name: workId, in: query, schema: { type: string } }
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 50 } }
       responses:
-        '200': { description: Event page, content: { application/json: { schema: { $ref: '#/components/schemas/EventPage' } } } }
+        '200': { description: Event page ordered oldest-first, content: { application/json: { schema: { $ref: '#/components/schemas/EventPage' } } } }
         '400': { $ref: '#/components/responses/BadRequest' }
   /api/v0/events/stream:
     get:
       operationId: streamEvents
       parameters:
-        - { name: after, in: query, schema: { type: string, pattern: '^[0-9]+$', default: '0' } }
+        - { name: after, in: query, description: Exclusive event cursor; Last-Event-ID takes precedence when present., schema: { type: string, pattern: '^[0-9]+$', default: '0' } }
         - { name: workId, in: query, schema: { type: string } }
       responses:
         '200':
@@ -56,6 +71,13 @@ components:
     BadRequest: { description: Invalid request, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
     NotFound: { description: Resource not found, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
   schemas:
+    CreateWorkRequest:
+      type: object
+      required: [goal]
+      additionalProperties: false
+      properties:
+        goal: { type: string, minLength: 1 }
+        workerProfile: { type: string, default: stub }
     Health:
       type: object
       required: [status, version, store]
@@ -63,6 +85,20 @@ components:
         status: { type: string, const: ok }
         version: { type: string }
         store: { type: string, const: readable }
+    Overview:
+      type: object
+      required: [totalWorks, statusCounts]
+      properties:
+        totalWorks: { type: integer, minimum: 0 }
+        statusCounts:
+          type: object
+          required: [ready, running, succeeded, failed, parked]
+          properties:
+            ready: { type: integer, minimum: 0 }
+            running: { type: integer, minimum: 0 }
+            succeeded: { type: integer, minimum: 0 }
+            failed: { type: integer, minimum: 0 }
+            parked: { type: integer, minimum: 0 }
     WorkSnapshot:
       type: object
       required: [workId, status, goal, workerProfile, createdAtUnixMs, workspaceBound]

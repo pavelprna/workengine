@@ -8,7 +8,8 @@
 | [0003](0003-worker-is-a-process.md) | Worker is a process | Accepted |
 | [0004](0004-worker-profile-is-configuration.md) | Worker profile is configuration | Accepted |
 | [0005](0005-sandboxed-attempt-protocol.md) | Sandboxed attempt protocol | Accepted |
-| [0006](0006-local-observer-boundary.md) | Local Web observer boundary | Accepted |
+| [0006](0006-local-observer-boundary.md) | Local Web observer boundary | Partially superseded by 0007 |
+| [0007](0007-local-operator-intake.md) | Local operator intake before live control | Accepted |
 
 Status values: Proposed, Accepted, Superseded, Deprecated.
 

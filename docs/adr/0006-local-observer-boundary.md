@@ -1,6 +1,6 @@
 # 0006. Local Web observer boundary
 
-- Status: Accepted
+- Status: Accepted (partially superseded by ADR 0007)
 - Date: 2026-09-11
 
 ## Context
@@ -15,12 +15,13 @@ it opened the store, so an apparently read-only command could park Work.
   mutation-capable `WorkStore` port.
 - SQLite observation uses a read-only connection. HTTP, SSE, `list`, `show`,
   and `events` do not recover or write Work state.
-- Until the v0.4 daemon exists, `start` is the foreground controller and runs
-  recovery before it launches a Worker. `serve` is only an observer.
-- `workengine serve` is localhost-only (`127.0.0.1` and `::1`), offers no
-  lifecycle controls, authentication, or remote bind option, and serves a
-  same-origin embedded UI plus `/api/v0`.
-- `contracts/observer.openapi.yaml` is the canonical internal observer
+- Until a durable active-attempt lease exists, `start` is the foreground
+  controller and runs recovery before it launches a Worker.
+- `workengine serve` is localhost-only (`127.0.0.1` and `::1`), has no live
+  execution controls, authentication, or remote bind option, and serves a
+  same-origin embedded UI plus `/api/v0`. ADR 0007 adds its narrow create-only
+  operator intake route.
+- `contracts/observer.openapi.yaml` is the canonical internal local API
   contract. It is intentionally not a public v1 API.
 - Tokio is permitted only in the HTTP adapter. Domain and application remain
   synchronous; the Worker execution loop is still spawn, wait, record.

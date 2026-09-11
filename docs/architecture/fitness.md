@@ -68,6 +68,8 @@ These are not SemVer surfaces and not architecture. Canon for commits is `CONTRI
 | F25 | Process Worker env is empty except secret-file paths; secret values are transient host `0600` files and missing outcome is `failed`, not exit-code success | worker adapter test | enforced |
 | F26 | Read observers (`list`, `show`, `events`, HTTP, SSE) do not recover or append a Work event | CLI / HTTP integration test | enforced |
 | F27 | Tokio is confined to the HTTP adapter; domain and application stay synchronous | CLI architecture test | enforced |
+| F28 | Local HTTP intake can create only `ready` Work through the application use case; it cannot set status or workspace data | HTTP integration test | enforced |
+| F29 | HTTP overview is calculated from one read-only snapshot; resumable event cursors are exclusive and `Last-Event-ID` wins over query input | HTTP integration test | enforced |
 
 ## How to add a check
 

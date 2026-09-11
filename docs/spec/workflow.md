@@ -28,8 +28,9 @@ First-slice transitions. Status names are defined in [work.md](work.md). Workeng
 
 ## Operations
 
-The current CLI slice exposes `create`, `next`, `start`, and `park`. `complete`
-is an internal control-plane operation, not a user command. Their rules:
+The CLI exposes `create`, `next`, `start`, and `park`; the localhost Web intake
+also exposes the narrow `create` operation. `complete` is an internal
+control-plane operation, not a user command. Their rules:
 
 - **[TESTED]** `create` MUST persist a new Work as `ready` with a `Created` event, atomically, and MUST NOT spawn a Worker.
 - **[TESTED]** `next` MUST select Work according to the store and the FSM, not by asking a model which item or phase to take.
@@ -65,8 +66,8 @@ is an internal control-plane operation, not a user command. Their rules:
 - **[ENFORCED]** Effects visible outside Workengine MUST be performed by Workengine, not by the Worker process.
 - **[UNTESTED]** Publish adapters MUST be best-effort. A channel failure MUST NOT roll back the source of truth.
 - **[TESTED]** Any two observers MUST see the same snapshot of a given Work.
-- **[UNTESTED]** A subscription to the event stream MUST be resumable without loss and without duplicates.
-- **[UNTESTED]** A Work summary MUST be structured. Operators MUST NOT have to parse raw logs to know status.
+- **[TESTED]** A subscription to the event stream MUST be resumable without loss and without duplicates. The cursor is exclusive, and `Last-Event-ID` takes precedence when both resume mechanisms are present.
+- **[TESTED]** A Work summary MUST be structured. Operators MUST NOT have to parse raw logs to know status.
 - **[TESTED]** Output of every Workengine-supervised subprocess, including the Worker, MUST use one streaming format.
 - **[TESTED]** Each record in that stream MUST carry a mandatory set of accounting fields, including `work_id`.
 - **[UNTESTED]** Navigation from a summary to raw artifacts MUST be a finite number of steps. Each significant step MUST leave a visible proof artifact.

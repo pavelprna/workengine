@@ -54,13 +54,13 @@ Used by `create`, `start`, `complete`, and `park`. No separate spec.
 
 ## Inbound
 
-Creates Work from an external source after an explicit ready signal. The local
-HTTP observer is also inbound in transport terms, but is deliberately read-only
-and is not an external source.
+Creates Work from an external source after an explicit ready signal. A local
+operator may also create Work through the localhost HTTP transport; that route
+uses the same `create` use case and is not an external source.
 
 | First adapter | Next |
 | --- | --- |
-| Localhost HTTP query/SSE observer; CLI creates Work | Any tracker behind the port |
+| Localhost HTTP query/SSE observer and operator intake; CLI creates Work | Any tracker behind the port |
 
 The domain does not mention a tracker. Adding a source is a new adapter crate or module, not a new entity. See [work.md](../spec/work.md) Source.
 
