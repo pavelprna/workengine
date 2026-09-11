@@ -22,6 +22,9 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: just,cargo-deny
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.11
       - name: just check
         run: just check
       - name: Conventional Commits (F18)
