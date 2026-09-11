@@ -1,0 +1,638 @@
+import {
+  Link,
+  useNavigate,
+  useParams,
+  useSearch,
+} from "@tanstack/react-router";
+import {
+  Activity,
+  ArrowRight,
+  ArrowUpRight,
+  CheckCircle2,
+  CircleAlert,
+  CircleDot,
+  Database,
+  FileClock,
+  Filter,
+  ListFilter,
+  Plus,
+  Radio,
+  RefreshCw,
+  ShieldCheck,
+} from "lucide-react";
+import { type FormEvent, useState } from "react";
+import {
+  api,
+  type WorkEvent,
+  type WorkFilters,
+  type WorkSnapshot,
+  type WorkStatus,
+  workStatuses,
+} from "./api/client";
+import { useLiveConnection } from "./live";
+import { workRoute, worksRoute } from "./router";
+
+function timeParts(unixMs: string) {
+  const date = new Date(Number(unixMs));
+  return {
+    dateTime: date.toISOString(),
+    label: new Intl.DateTimeFormat(undefined, {
+      dateStyle: "medium",
+      timeStyle: "short",
+    }).format(date),
+  };
+}
+
+function StatusBadge({ status }: { status: WorkStatus }) {
+  return <span className={`status ${status}`}>{status}</span>;
+}
+
+function QueryError({
+  message,
+  retry,
+}: {
+  message: string;
+  retry?: () => void;
+}) {
+  return (
+    <div className="query-error" role="alert">
+      <CircleAlert size={19} />
+      <p>{message}</p>
+      {retry && (
+        <button className="text-button" onClick={retry} type="button">
+          Try again
+        </button>
+      )}
+    </div>
+  );
+}
+
+function WorkRows({ works }: { works: WorkSnapshot[] }) {
+  if (works.length === 0) {
+    return (
+      <div className="empty-state">
+        <CircleDot size={24} />
+        <p>No Work matches this view.</p>
+      </div>
+    );
+  }
+
+  return (
+    <ol className="work-list">
+      {works.map((work) => {
+        const created = timeParts(work.createdAtUnixMs);
+        return (
+          <li key={work.workId}>
+            <Link
+              className="work-row"
+              params={{ workId: work.workId }}
+              to="/works/$workId"
+            >
+              <span
+                className={`status-dot ${work.status}`}
+                aria-hidden="true"
+              />
+              <span className="work-copy">
+                <strong>{work.goal}</strong>
+                <small>
+                  {work.workerProfile} ·{" "}
+                  <time dateTime={created.dateTime}>{created.label}</time>
+                </small>
+              </span>
+              <StatusBadge status={work.status} />
+              <ArrowRight className="row-arrow" size={17} aria-hidden="true" />
+            </Link>
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
+function LoadMore({
+  hasMore,
+  loading,
+  onLoad,
+}: {
+  hasMore: boolean;
+  loading: boolean;
+  onLoad: () => void;
+}) {
+  if (!hasMore) return null;
+  return (
+    <button
+      className="load-more"
+      disabled={loading}
+      onClick={onLoad}
+      type="button"
+    >
+      <RefreshCw size={15} className={loading ? "spinning" : undefined} />
+      {loading ? "Loading…" : "Load more Work"}
+    </button>
+  );
+}
+
+function NewWorkForm() {
+  const createWork = api.useCreateWork();
+  const navigate = useNavigate();
+  const [goal, setGoal] = useState("");
+  const [profile, setProfile] = useState("stub");
+
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    createWork.mutate(
+      { goal, workerProfile: profile },
+      {
+        onSuccess: (work) => {
+          void navigate({
+            to: "/works/$workId",
+            params: { workId: work.workId },
+          });
+        },
+      },
+    );
+  }
+
+  return (
+    <section className="intake-panel" aria-labelledby="new-work-title">
+      <div className="panel-kicker">
+        <Plus size={15} /> OPERATOR INTAKE
+      </div>
+      <h2 id="new-work-title">Put a task in the queue</h2>
+      <p className="quiet">
+        A goal and profile become durable Work immediately. Starting remains a
+        CLI-only action.
+      </p>
+      <form onSubmit={submit}>
+        <label htmlFor="goal">Goal</label>
+        <textarea
+          id="goal"
+          value={goal}
+          onChange={(event) => setGoal(event.target.value)}
+          placeholder="Describe the outcome you want…"
+          required
+          rows={5}
+        />
+        <label htmlFor="profile">Worker profile</label>
+        <input
+          id="profile"
+          value={profile}
+          onChange={(event) => setProfile(event.target.value)}
+          required
+        />
+        {createWork.isError && (
+          <p className="form-error" role="alert">
+            {createWork.error.message}
+          </p>
+        )}
+        <button
+          className="primary-action"
+          disabled={createWork.isPending}
+          type="submit"
+        >
+          <ArrowUpRight size={16} />
+          {createWork.isPending ? "Adding…" : "Add to queue"}
+        </button>
+      </form>
+    </section>
+  );
+}
+
+export function OverviewPage() {
+  const overview = api.useOverview();
+  const recent = api.useWorks({}, 5);
+  const connection = useLiveConnection();
+  const recentWorks = recent.data?.pages.flatMap((page) => page.items) ?? [];
+
+  return (
+    <>
+      <header className="page-header overview-header">
+        <p className="eyebrow">LOCAL CONTROL PLANE · v0.1</p>
+        <h1>Make the queue visible.</h1>
+        <p className="lede">
+          Durable Work is the record. This operator surface is only a window
+          into it — and a narrow front door for new tasks.
+        </p>
+      </header>
+      <section className="overview-grid" aria-label="System overview">
+        <div className="overview-card signal-card">
+          <div className="panel-kicker">
+            <Radio size={15} /> LIVE CONNECTION
+          </div>
+          <strong className={`connection-readout ${connection}`}>
+            {connection}
+          </strong>
+          <p>
+            {connection === "live"
+              ? "Events are refreshing this view."
+              : "The observer is reconnecting to its event stream."}
+          </p>
+        </div>
+        <div className="overview-card queue-total">
+          <div className="panel-kicker">
+            <ListFilter size={15} /> DURABLE QUEUE
+          </div>
+          {overview.isPending && (
+            <strong className="metric-loading">Reading…</strong>
+          )}
+          {overview.isError && (
+            <QueryError
+              message={overview.error.message}
+              retry={() => void overview.refetch()}
+            />
+          )}
+          {overview.data && (
+            <>
+              <strong>{overview.data.totalWorks}</strong>
+              <span>
+                Work item{overview.data.totalWorks === 1 ? "" : "s"} recorded
+              </span>
+            </>
+          )}
+        </div>
+        <div className="overview-card boundary-card">
+          <div className="panel-kicker">
+            <ShieldCheck size={15} /> BOUNDARY
+          </div>
+          <strong>localhost only</strong>
+          <p>
+            Observe and create are available. Execution stays with the
+            foreground CLI.
+          </p>
+        </div>
+      </section>
+      {overview.data && (
+        <section className="status-grid" aria-label="Work status counts">
+          {workStatuses.map((status) => (
+            <Link
+              key={status}
+              className={`status-count ${status}`}
+              search={{ profile: undefined, status }}
+              to="/works"
+            >
+              <span>{status}</span>
+              <strong>{overview.data.statusCounts[status]}</strong>
+            </Link>
+          ))}
+        </section>
+      )}
+      <section
+        className="content-panel recent-panel"
+        aria-labelledby="recent-title"
+      >
+        <div className="section-heading">
+          <div>
+            <p className="panel-kicker">LATEST RECORDS</p>
+            <h2 id="recent-title">Recent Work</h2>
+          </div>
+          <Link
+            className="text-link"
+            search={{ profile: undefined, status: undefined }}
+            to="/works"
+          >
+            View queue <ArrowRight size={15} />
+          </Link>
+        </div>
+        {recent.isPending && <p className="quiet">Reading recent Work…</p>}
+        {recent.isError && (
+          <QueryError
+            message={recent.error.message}
+            retry={() => void recent.refetch()}
+          />
+        )}
+        {recent.data && <WorkRows works={recentWorks} />}
+      </section>
+    </>
+  );
+}
+
+export function WorksPage() {
+  const search = useSearch({ from: worksRoute.id });
+  const navigate = useNavigate();
+  const [profileInput, setProfileInput] = useState(search.profile ?? "");
+  const filters: WorkFilters = {
+    status: search.status,
+    profile: search.profile,
+  };
+  const works = api.useWorks(filters);
+  const items = works.data?.pages.flatMap((page) => page.items) ?? [];
+
+  function setSearch(next: WorkFilters) {
+    void navigate({
+      to: "/works",
+      search: { profile: next.profile, status: next.status },
+    });
+  }
+
+  function applyProfile(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setSearch({ status: search.status, profile: profileInput || undefined });
+  }
+
+  return (
+    <>
+      <header className="page-header compact-header">
+        <p className="eyebrow">WORK REGISTRY</p>
+        <h1>Queue, not guesswork.</h1>
+        <p className="lede">
+          Filter the durable record. Selecting an item opens its append-only
+          history.
+        </p>
+      </header>
+      <div className="works-layout">
+        <section
+          className="content-panel queue-panel"
+          aria-labelledby="queue-title"
+        >
+          <div className="section-heading">
+            <div>
+              <p className="panel-kicker">FILTERABLE SNAPSHOT</p>
+              <h2 id="queue-title">Work queue</h2>
+            </div>
+            <span className="readout">NEWEST FIRST</span>
+          </div>
+          <div className="filters">
+            <fieldset className="status-filter">
+              <legend>Status</legend>
+              <button
+                className={!search.status ? "selected" : ""}
+                onClick={() => setSearch({ profile: search.profile })}
+                type="button"
+              >
+                all
+              </button>
+              {workStatuses.map((status) => (
+                <button
+                  className={search.status === status ? "selected" : ""}
+                  key={status}
+                  onClick={() => setSearch({ status, profile: search.profile })}
+                  type="button"
+                >
+                  {status}
+                </button>
+              ))}
+            </fieldset>
+            <form className="profile-filter" onSubmit={applyProfile}>
+              <label htmlFor="profile-filter">
+                <Filter size={14} /> Exact profile
+              </label>
+              <input
+                id="profile-filter"
+                onChange={(event) => setProfileInput(event.target.value)}
+                placeholder="all profiles"
+                value={profileInput}
+              />
+              <button className="text-button" type="submit">
+                Apply
+              </button>
+            </form>
+          </div>
+          {works.isPending && <p className="quiet">Reading the queue…</p>}
+          {works.isError && (
+            <QueryError
+              message={works.error.message}
+              retry={() => void works.refetch()}
+            />
+          )}
+          {works.data && (
+            <>
+              <WorkRows works={items} />
+              <LoadMore
+                hasMore={works.hasNextPage}
+                loading={works.isFetchingNextPage}
+                onLoad={() => void works.fetchNextPage()}
+              />
+            </>
+          )}
+        </section>
+        <NewWorkForm />
+      </div>
+    </>
+  );
+}
+
+function Timeline({ events }: { events: WorkEvent[] }) {
+  if (events.length === 0)
+    return (
+      <div className="empty-state">
+        <FileClock size={24} />
+        <p>No events were recorded for this Work.</p>
+      </div>
+    );
+  return (
+    <ol className="timeline">
+      {events.map((event) => {
+        const time = timeParts(event.createdAtUnixMs);
+        return (
+          <li key={event.cursor}>
+            <span
+              className={`timeline-marker ${event.to}`}
+              aria-hidden="true"
+            />
+            <div>
+              <div className="timeline-title">
+                <strong>{event.kind}</strong>
+                <StatusBadge status={event.to} />
+              </div>
+              <p>
+                {event.from
+                  ? `${event.from} → ${event.to}`
+                  : `entered ${event.to}`}
+                {event.outcomeKind ? ` · ${event.outcomeKind}` : ""}
+              </p>
+              <time dateTime={time.dateTime}>
+                {time.label} · event #{event.cursor}
+              </time>
+            </div>
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
+export function WorkDetailPage() {
+  const { workId } = useParams({ from: workRoute.id });
+  const work = api.useWork(workId);
+  const events = api.useEvents(workId);
+  const allEvents = events.data?.pages.flatMap((page) => page.items) ?? [];
+
+  if (work.isPending)
+    return <p className="quiet page-loading">Opening Work record…</p>;
+  if (work.isError)
+    return (
+      <QueryError
+        message={work.error.message}
+        retry={() => void work.refetch()}
+      />
+    );
+  const created = timeParts(work.data.createdAtUnixMs);
+
+  return (
+    <>
+      <Link
+        className="back-link"
+        search={{ profile: undefined, status: undefined }}
+        to="/works"
+      >
+        ← Back to queue
+      </Link>
+      <header className="detail-hero">
+        <div>
+          <p className="eyebrow">WORK RECORD</p>
+          <h1>{work.data.goal}</h1>
+        </div>
+        <StatusBadge status={work.data.status} />
+      </header>
+      <section className="fact-grid" aria-label="Work facts">
+        <div>
+          <span>WORK ID</span>
+          <code>{work.data.workId}</code>
+        </div>
+        <div>
+          <span>PROFILE</span>
+          <strong>{work.data.workerProfile}</strong>
+        </div>
+        <div>
+          <span>CREATED</span>
+          <time dateTime={created.dateTime}>{created.label}</time>
+        </div>
+        <div>
+          <span>WORKSPACE</span>
+          <strong>{work.data.workspaceBound ? "bound" : "not bound"}</strong>
+        </div>
+        <div>
+          <span>OUTCOME</span>
+          <strong>{work.data.outcomeKind ?? "not confirmed"}</strong>
+        </div>
+      </section>
+      <section
+        className="content-panel timeline-panel"
+        aria-labelledby="timeline-title"
+      >
+        <div className="section-heading">
+          <div>
+            <p className="panel-kicker">APPEND-ONLY HISTORY</p>
+            <h2 id="timeline-title">Event timeline</h2>
+          </div>
+          <span className="readout">OLDEST FIRST</span>
+        </div>
+        {events.isPending && <p className="quiet">Reading recorded events…</p>}
+        {events.isError && (
+          <QueryError
+            message={events.error.message}
+            retry={() => void events.refetch()}
+          />
+        )}
+        {events.data && (
+          <>
+            <Timeline events={allEvents} />
+            <LoadMore
+              hasMore={events.hasNextPage}
+              loading={events.isFetchingNextPage}
+              onLoad={() => void events.fetchNextPage()}
+            />
+          </>
+        )}
+      </section>
+    </>
+  );
+}
+
+export function DoctorPage() {
+  const health = api.useHealth();
+  const connection = useLiveConnection();
+  return (
+    <>
+      <header className="page-header compact-header">
+        <p className="eyebrow">RUNTIME HEALTH</p>
+        <h1>Know the boundary.</h1>
+        <p className="lede">
+          Doctor verifies the local observer boundary; it does not probe Worker
+          profiles or execution runtimes.
+        </p>
+      </header>
+      <section className="doctor-grid">
+        <div className="doctor-card">
+          <Activity size={20} />
+          <span>API</span>
+          <strong>
+            {health.data?.status === "ok" ? "reachable" : "checking"}
+          </strong>
+          <p>Same-origin local API.</p>
+        </div>
+        <div className="doctor-card">
+          <Database size={20} />
+          <span>STORE</span>
+          <strong>{health.data?.store ?? "unknown"}</strong>
+          <p>Read-only observer query succeeded.</p>
+        </div>
+        <div className="doctor-card">
+          <Radio size={20} />
+          <span>EVENTS</span>
+          <strong>{connection}</strong>
+          <p>Resumable SSE observer connection.</p>
+        </div>
+        <div className="doctor-card">
+          <ShieldCheck size={20} />
+          <span>LISTENER</span>
+          <strong>localhost</strong>
+          <p>No remote bind or authentication in v0.1.</p>
+        </div>
+      </section>
+      {health.isError && (
+        <QueryError
+          message={health.error.message}
+          retry={() => void health.refetch()}
+        />
+      )}
+      <section
+        className="content-panel capability-panel"
+        aria-labelledby="capability-title"
+      >
+        <div className="section-heading">
+          <div>
+            <p className="panel-kicker">V0.1 CAPABILITIES</p>
+            <h2 id="capability-title">What this surface may do</h2>
+          </div>
+          {health.data && <code>{health.data.version}</code>}
+        </div>
+        <dl className="capability-list">
+          <div>
+            <dt>Observe Work and events</dt>
+            <dd className="yes">yes</dd>
+          </div>
+          <div>
+            <dt>Create ready Work</dt>
+            <dd className="yes">yes</dd>
+          </div>
+          <div>
+            <dt>Start, park or abort Work</dt>
+            <dd>not yet</dd>
+          </div>
+          <div>
+            <dt>Read workspace or secrets</dt>
+            <dd>never</dd>
+          </div>
+        </dl>
+      </section>
+    </>
+  );
+}
+
+export function NotFoundPage() {
+  return (
+    <section className="not-found">
+      <CheckCircle2 size={24} />
+      <p className="eyebrow">NOT FOUND</p>
+      <h1>That record is not here.</h1>
+      <Link
+        className="primary-action"
+        search={{ profile: undefined, status: undefined }}
+        to="/works"
+      >
+        Return to queue
+      </Link>
+    </section>
+  );
+}

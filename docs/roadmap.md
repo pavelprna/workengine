@@ -21,20 +21,22 @@ The current CLI slice has stable Work identity and attributes, the Work FSM,
 atomic SQLite status and append-only event history, workspace binding and
 append-only memory, versioned typed Worker outcomes, profile-based sandbox
 launch, process-group supervision, structured subprocess records, lazy profile
-validation, and JSON snapshots and event cursors. It also has the v0.1
-foundation: a localhost-only, read-only HTTP/SSE observer API, embedded Web
-application shell, and a read-only query port. The Work list, detail timeline,
-and richer doctor views remain to be delivered. External dependencies sit
-behind application ports. It does not yet have a daemon, durable attempt
-provenance, live control, capture/CAS, external inbound sources, or publishers.
+validation, and JSON snapshots and event cursors. v0.1 is complete: the
+localhost-only HTTP/SSE API offers read-only observation plus narrow local
+intake, and the embedded Web UI provides overview, a filterable paginated
+queue, Work detail and timeline, and the diagnostic boundary. External
+dependencies sit behind application ports. It does not yet have a daemon,
+durable attempt provenance, live control, capture/CAS, external inbound
+sources, or publishers.
 
 The sandboxed-attempt decision is accepted, but its attempt IDs, protected
 control artifacts, configuration snapshots, checkpoint/abort supervision, and
 per-Work CAS remain pending. See [ADR 0005](adr/0005-sandboxed-attempt-protocol.md).
 
-## v0.1 — Observer
+## v0.1 — Observe and intake
 
-Make observation safe and useful before adding Web controls.
+Make observation safe and useful while adding the first, deliberately narrow
+Web control.
 
 - Separate read-only queries from recovery. Reading Work or events must never
   park, complete, or otherwise mutate Work.
@@ -42,15 +44,19 @@ Make observation safe and useful before adding Web controls.
   pagination.
 - Add a localhost-only `serve` mode with an HTTP query API and resumable SSE
   stream. The UI never reads SQLite directly.
-- Deliver a read-only Web UI: system overview, filterable Work list, Work detail,
-  event timeline, and runtime health/doctor page.
+- Deliver a Web UI: system overview, filterable Work list, Work detail, event
+  timeline, and runtime health/doctor page.
+- Let a local operator create `ready` Work from that UI. The browser supplies
+  only a goal and profile name; it never supplies an argv, secrets, a workspace
+  path, a sandbox policy, or a status.
 - Keep this first API explicitly internal until the execution model below is
   durable enough to freeze as public `v1`.
 
 Exit criterion: an observer can reconnect after an event cursor without losing
-or duplicating events, any two observers see the same Work snapshot, and
-repeated polling of a running Work produces no new store event and does not
-change its status.
+or duplicating events, any two observers see the same Work snapshot, a locally
+created Work is immediately durable and visible to all observers, and repeated
+polling of a running Work produces no new store event and does not change its
+status.
 
 ## v0.2 — Durable execution
 
@@ -82,7 +88,21 @@ Exit criterion: concurrent starts cannot run one Work twice, only the matching
 active attempt can complete it, and a failed workspace remains available until
 an operator explicitly cleans it up.
 
-## v0.3 — Complete observation
+## v0.3 — Operator launch
+
+Put the first live execution control where an operator can use it, as soon as
+durable attempts make it safe.
+
+- Add an explicit local `start` control for `ready` or `parked` Work through
+  the same single-writer control path as the CLI.
+- Show the confirmed transition to `running` and its terminal outcome; refuse a
+  second active start for the same Work.
+- Keep park, abort, checkpoint, answers, and remote serving out of this slice.
+
+Exit criterion: the UI can create a Work, explicitly start it once, and show
+the confirmed terminal result without bypassing the active-attempt lease.
+
+## v0.4 — Complete observation
 
 Extend the UI and query model from Work status to the execution itself.
 
@@ -96,7 +116,7 @@ Extend the UI and query model from Work status to the execution itself.
 Exit criterion: an operator can explain the current state and outcome of every
 Work from the UI without shelling into its workspace.
 
-## v0.4 — Operator
+## v0.5 — Live operator
 
 Move lifecycle control into a long-lived, single-writer supervisor.
 
@@ -115,7 +135,7 @@ Move lifecycle control into a long-lived, single-writer supervisor.
 Exit criterion: park reaches a validated save point, abort never masquerades as
 park, and an operator can interrupt any active Work.
 
-## v0.5 — Policy and containment
+## v0.6 — Policy and containment
 
 Close the security policy around real coding-agent workloads.
 
@@ -136,7 +156,7 @@ irreversible permission implicitly; untrusted text cannot become a control
 command; and secret values do not appear in observable process records or
 published output.
 
-## v0.6 — Queue and integrations
+## v0.7 — Queue and integrations
 
 Scale from one local operator to independent projects and adapters.
 
