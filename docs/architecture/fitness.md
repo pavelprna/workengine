@@ -74,6 +74,10 @@ These are not SemVer surfaces and not architecture. Canon for commits is `CONTRI
 | F31 | CLI and localhost HTTP start use one application path; only one active attempt can claim a Work and the browser cannot provide execution configuration | application, store, HTTP, and CLI tests | enforced |
 | F32 | Execution observation is read-only, typed, and finite from Work summary to control-plane proof artifacts | store and HTTP integration tests | enforced |
 | F33 | Attempt heartbeat and process records require the matching active lease; child stdout/stderr payloads are never persisted or returned | worker, store, and HTTP integration tests | enforced |
+| F34 | The daemon is the lifecycle writer; CLI mutations use its local API, and a second start cannot create a second supervisor | CLI and HTTP integration tests | enforced |
+| F35 | Live park commits only after a validated attempt checkpoint; abort tears down the process group and records `aborted`, never `parked` | worker, application, and store tests | enforced |
+| F36 | Resume and operator input continue the same Work and execution with a fresh attempt id | application, store, and CLI tests | enforced |
+| F37 | Daemon startup reclaims every unconfirmed active lease before accepting controls | store and CLI tests | enforced |
 
 ## How to add a check
 

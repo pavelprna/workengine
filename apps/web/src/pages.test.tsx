@@ -117,6 +117,15 @@ beforeEach(() => {
     if (url.pathname === "/api/v0/works/work-new") {
       return response(work("work-new", "created from browser"));
     }
+    if (
+      url.pathname === "/api/v0/works/work-running/park" &&
+      method === "POST"
+    ) {
+      return response(work("work-running", "interrupt safely", "parked"));
+    }
+    if (url.pathname === "/api/v0/works/work-running") {
+      return response(work("work-running", "interrupt safely", "running"));
+    }
     if (url.pathname === "/api/v0/works/work-detail") {
       return response({
         ...work("work-detail", "inspect history", "succeeded"),
@@ -341,3 +350,23 @@ test.serial(
     ).toBe(true);
   },
 );
+
+test.serial("running Work can be checkpointed from its record", async () => {
+  const router = createAppRouter();
+  await router.navigate({
+    to: "/works/$workId",
+    params: { workId: "work-running" },
+  });
+  renderApp(router);
+  await screen.findByRole("heading", { name: "interrupt safely" });
+
+  await userEvent.click(screen.getByRole("button", { name: "Park" }));
+
+  await screen.findByRole("button", { name: "Resume" });
+  expect(
+    requests.some(
+      ({ method, url }) =>
+        method === "POST" && url.pathname === "/api/v0/works/work-running/park",
+    ),
+  ).toBe(true);
+});

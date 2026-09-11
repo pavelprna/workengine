@@ -23,6 +23,7 @@ This document is the canonical behaviour of Worker. Keywords follow [RFC 2119](h
 - **[TESTED]** The channel between Workengine and a Worker MUST be machine-readable.
 - **[TESTED]** Free text from a Worker MUST NOT be interpreted as a control command (next status, publish, park, complete).
 - **[TESTED]** A Worker response MUST conform to an explicit schema with `schemaVersion`.
+- **[TESTED]** A checkpoint candidate MUST use the attempt-scoped control directory and bind `schemaVersion`, Work id, execution id, attempt id, and Worker profile. A stale, foreign, malformed, or workspace-shared candidate MUST NOT park Work.
 - **[TESTED]** Every Worker run MUST return an outcome from a closed set of kinds. Unknown kinds MUST be a schema error.
 - **[TESTED]** The first runtime slice MUST include at least these outcome kinds: succeeded, failed, timed out / hung, budget exceeded, and a classified channel error.
 

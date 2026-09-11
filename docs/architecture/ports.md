@@ -1,8 +1,8 @@
 # Ports
 
 Ports are traits in `workengine-application`. Adapters implement them. The first
-vertical slice implements the four runtime ports. Local inbound observation,
-intake, and explicit start are present; external inbound and publish wait.
+vertical slice implements the runtime ports. Local inbound observation and the
+daemon-owned lifecycle are present; external inbound and publish wait.
 
 Trait signatures below are intent, not frozen Rust. The crate is the API. Behaviour (`MUST` / `MUST NOT`) lives in `docs/spec/`. This file maps each port to adapters.
 
@@ -14,8 +14,9 @@ Trait signatures below are intent, not frozen Rust. The crate is the API. Behavi
 execution/attempt observation projection. It has no transition or recovery
 operation. `WorkStore` extends it with the atomic status-plus-event write used
 by control-plane use cases. `AttemptRecorder` is the narrow live-observation
-port used by a supervised Worker to record heartbeat and payload-free process
-metadata against the matching active lease.
+and supervisor-control port used by a supervised Worker to record heartbeat
+and payload-free process metadata and poll an attempt-scoped durable park/abort
+request against the matching active lease.
 
 Persists current Work status and the append-only event log.
 
@@ -87,9 +88,16 @@ One use case per module, named after the CLI verb:
 - `next`
 - `start`
 - `complete`
-- `park`
+- `request_control`
+- `record_operator_input`
 
-`start` binds a workspace, writes the goal, optionally copies a checkout, spawns through `WorkerRunner`, waits, and applies `complete`. Channel errors are classified by reaction: fail completes as `channel_error`; park calls `park` on the same Work; retry re-spawns inside that `start` up to the snapshotted limit, then fail. Shared workspace outcome files are rejected: only a future attempt-scoped control artifact can become a recovery authority.
+`start` binds a workspace, writes the goal, creates an attempt-scoped control
+directory, spawns through `WorkerRunner`, waits, and applies `complete` or a
+checkpoint-confirmed park. A resume uses the same immutable execution and a
+fresh attempt. Channel errors are classified by reaction: fail completes as
+`channel_error`; a checkpointed park leaves the same Work parked; retry
+re-spawns inside that `start` up to the snapshotted limit, then fails. Shared
+workspace outcome files remain rejected.
 
 Later: `capture`. Not a god-object orchestrator.
 

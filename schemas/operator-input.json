@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://workengine.local/schemas/operator-input-v1.json",
+  "title": "Workengine operator input line",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "inputId",
+    "workId",
+    "kind",
+    "body",
+    "createdAtUnixMs"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "inputId": { "type": "integer", "minimum": 1 },
+    "workId": { "type": "string", "minLength": 1 },
+    "kind": { "type": "string", "enum": ["answer", "consent"] },
+    "body": { "type": "string", "minLength": 1 },
+    "createdAtUnixMs": { "type": "integer", "minimum": 0 }
+  }
+}

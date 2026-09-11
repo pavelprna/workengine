@@ -66,6 +66,63 @@ pub enum AttemptState {
     Parked,
 }
 
+/// Durable operator request consumed by the matching active supervisor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ControlKind {
+    Park,
+    Abort,
+}
+
+impl ControlKind {
+    pub const ALL: [Self; 2] = [Self::Park, Self::Abort];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Park => "park",
+            Self::Abort => "abort",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self, AppError> {
+        match value {
+            "park" => Ok(Self::Park),
+            "abort" => Ok(Self::Abort),
+            _ => Err(AppError::store(format!(
+                "unknown persisted control kind {value}"
+            ))),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ControlDirective {
+    pub request_id: i64,
+    pub kind: ControlKind,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OperatorInputKind {
+    Answer,
+    Consent,
+}
+
+impl OperatorInputKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Answer => "answer",
+            Self::Consent => "consent",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OperatorInput {
+    pub id: i64,
+    pub kind: OperatorInputKind,
+    pub body: String,
+    pub created_at_unix_ms: u64,
+}
+
 impl AttemptState {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -168,20 +225,39 @@ pub trait WorkQuery {
 pub trait AttemptRecorder {
     fn heartbeat_attempt(
         &mut self,
-        work_id: &WorkId,
-        execution_id: &ExecutionId,
-        attempt_id: &AttemptId,
+        _work_id: &WorkId,
+        _execution_id: &ExecutionId,
+        _attempt_id: &AttemptId,
         observed_at_unix_ms: u64,
     ) -> Result<(), AppError>;
 
     fn record_process_event(
         &mut self,
-        work_id: &WorkId,
-        execution_id: &ExecutionId,
-        attempt_id: &AttemptId,
+        _work_id: &WorkId,
+        _execution_id: &ExecutionId,
+        _attempt_id: &AttemptId,
         event: ProcessEvent,
         observed_at_unix_ms: u64,
     ) -> Result<(), AppError>;
+
+    fn control_directive(
+        &mut self,
+        _work_id: &WorkId,
+        _execution_id: &ExecutionId,
+        _attempt_id: &AttemptId,
+    ) -> Result<Option<ControlDirective>, AppError> {
+        Ok(None)
+    }
+
+    fn record_checkpoint(
+        &mut self,
+        _work_id: &WorkId,
+        _execution_id: &ExecutionId,
+        _attempt_id: &AttemptId,
+        _observed_at_unix_ms: u64,
+    ) -> Result<(), AppError> {
+        Ok(())
+    }
 }
 
 /// Recorder for adapter tests and runners used outside a claimed execution.
@@ -204,6 +280,25 @@ impl AttemptRecorder for DiscardAttemptRecorder {
         _execution_id: &ExecutionId,
         _attempt_id: &AttemptId,
         _event: ProcessEvent,
+        _observed_at_unix_ms: u64,
+    ) -> Result<(), AppError> {
+        Ok(())
+    }
+
+    fn control_directive(
+        &mut self,
+        _work_id: &WorkId,
+        _execution_id: &ExecutionId,
+        _attempt_id: &AttemptId,
+    ) -> Result<Option<ControlDirective>, AppError> {
+        Ok(None)
+    }
+
+    fn record_checkpoint(
+        &mut self,
+        _work_id: &WorkId,
+        _execution_id: &ExecutionId,
+        _attempt_id: &AttemptId,
         _observed_at_unix_ms: u64,
     ) -> Result<(), AppError> {
         Ok(())
@@ -235,6 +330,18 @@ pub trait WorkStore: WorkQuery + AttemptRecorder {
         outcome: &ConfirmedOutcome,
     ) -> Result<(), AppError>;
 
+    fn confirm_attempt_with_reason(
+        &mut self,
+        work: &Work,
+        event: WorkEvent,
+        outcome: &ConfirmedOutcome,
+        terminal_reason: &str,
+        control_request_id: Option<i64>,
+    ) -> Result<(), AppError> {
+        let _ = (terminal_reason, control_request_id);
+        self.confirm_attempt(work, event, outcome)
+    }
+
     /// Atomically releases the matching lease into the parked queue.
     fn park_attempt(
         &mut self,
@@ -243,6 +350,64 @@ pub trait WorkStore: WorkQuery + AttemptRecorder {
         execution_id: &ExecutionId,
         attempt_id: &AttemptId,
     ) -> Result<(), AppError>;
+
+    fn park_attempt_with_checkpoint(
+        &mut self,
+        work: &Work,
+        event: WorkEvent,
+        execution_id: &ExecutionId,
+        attempt_id: &AttemptId,
+        checkpoint_recorded: bool,
+        control_request_id: Option<i64>,
+    ) -> Result<(), AppError> {
+        if !checkpoint_recorded {
+            return Err(AppError::Conflict(
+                "park requires a validated attempt checkpoint".to_owned(),
+            ));
+        }
+        let _ = control_request_id;
+        self.park_attempt(work, event, execution_id, attempt_id)
+    }
+
+    /// Persist an attempt-scoped operator request after validating the lease.
+    fn request_control(
+        &mut self,
+        _work_id: &WorkId,
+        kind: ControlKind,
+        created_at_unix_ms: u64,
+    ) -> Result<ControlDirective, AppError> {
+        let _ = (kind, created_at_unix_ms);
+        Err(AppError::Conflict(
+            "store does not support live control".to_owned(),
+        ))
+    }
+
+    /// Atomically release an abandoned active lease back into the queue.
+    fn reclaim_attempt(
+        &mut self,
+        work: &Work,
+        event: WorkEvent,
+        execution_id: &ExecutionId,
+        attempt_id: &AttemptId,
+    ) -> Result<(), AppError> {
+        let _ = (execution_id, attempt_id);
+        self.put(work, event)
+    }
+
+    fn append_operator_input(
+        &mut self,
+        _work_id: &WorkId,
+        kind: OperatorInputKind,
+        body: &str,
+        created_at_unix_ms: u64,
+    ) -> Result<OperatorInput, AppError> {
+        Ok(OperatorInput {
+            id: 1,
+            kind,
+            body: body.to_owned(),
+            created_at_unix_ms,
+        })
+    }
 }
 
 pub struct AttemptClaim<'a> {
@@ -267,16 +432,39 @@ pub trait WorkspaceFactory {
     fn read_artifact(&self, work_id: &WorkId) -> Result<Option<Vec<u8>>, AppError>;
     fn record_memory(
         &self,
-        work_id: &WorkId,
+        _work_id: &WorkId,
         status: WorkStatus,
         outcome_kind: OutcomeKind,
     ) -> Result<(), AppError>;
+    fn bind_attempt_control(
+        &self,
+        work_id: &WorkId,
+        execution_id: &ExecutionId,
+        attempt_id: &AttemptId,
+    ) -> Result<PathBuf, AppError> {
+        let _ = (work_id, execution_id, attempt_id);
+        Ok(PathBuf::from("."))
+    }
+    fn record_operator_input(
+        &self,
+        _work_id: &WorkId,
+        input: &OperatorInput,
+    ) -> Result<(), AppError> {
+        let _ = input;
+        Ok(())
+    }
 }
 
 /// Spawn, wait, record. Implementations own process groups and hang detection.
 pub trait WorkerRunner {
-    fn run(&self, request: &mut RunRequest<'_>) -> Result<Outcome, AppError>;
+    fn run(&self, request: &mut RunRequest<'_>) -> Result<WorkerExit, AppError>;
     fn decode(&self, bytes: &[u8]) -> Result<Outcome, AppError>;
+}
+
+pub enum WorkerExit {
+    Completed(Outcome),
+    Parked { control_request_id: Option<i64> },
+    Aborted { control_request_id: i64 },
 }
 
 pub struct RunRequest<'a> {
@@ -284,6 +472,7 @@ pub struct RunRequest<'a> {
     pub execution_id: &'a ExecutionId,
     pub attempt_id: &'a AttemptId,
     pub workspace_root: &'a Path,
+    pub control_root: &'a Path,
     pub budget: Duration,
     pub recorder: &'a mut dyn AttemptRecorder,
 }

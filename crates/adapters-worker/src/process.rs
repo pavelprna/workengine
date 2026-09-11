@@ -4,7 +4,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use workengine_application::{AppError, ChannelReaction, RunRequest, WorkerRunner};
+use serde::{Deserialize, Serialize};
+use workengine_application::{AppError, ChannelReaction, RunRequest, WorkerExit, WorkerRunner};
 use workengine_domain::{OUTCOME_SCHEMA_VERSION, Outcome, OutcomeKind};
 
 use crate::decode_outcome;
@@ -88,17 +89,40 @@ impl ProcessWorkerRunner {
 }
 
 impl WorkerRunner for ProcessWorkerRunner {
-    fn run(&self, request: &mut RunRequest<'_>) -> Result<Outcome, AppError> {
+    fn run(&self, request: &mut RunRequest<'_>) -> Result<WorkerExit, AppError> {
         let profile = request.work.attributes().worker_profile();
         fs::create_dir_all(request.workspace_root).map_err(AppError::worker)?;
         let secrets = SecretDirectory::create(&self.secret_files)?;
         let cmd = self.command(
             request.workspace_root,
+            request.control_root,
             secrets.as_ref().map(SecretDirectory::path),
+            request.work.id().as_str(),
+            request.execution_id.as_str(),
+            request.attempt_id.as_str(),
         )?;
-        match spawn_supervised(cmd, request) {
-            Ok(ChildWait::Exited { .. }) => read_or_fail(request.workspace_root, profile),
-            Ok(ChildWait::BudgetExceeded) => persist_timed_out(request.workspace_root, profile),
+        let waited = spawn_supervised(cmd, request);
+        if !matches!(&waited, Ok(ChildWait::Exited { .. })) {
+            reclaim_owned_container(
+                request.control_root,
+                request.work.id().as_str(),
+                request.execution_id.as_str(),
+                request.attempt_id.as_str(),
+            )?;
+        }
+        match waited {
+            Ok(ChildWait::Exited { .. }) => {
+                read_or_fail(request.workspace_root, profile).map(WorkerExit::Completed)
+            }
+            Ok(ChildWait::BudgetExceeded) => {
+                persist_timed_out(request.workspace_root, profile).map(WorkerExit::Completed)
+            }
+            Ok(ChildWait::Parked { control_request_id }) => {
+                Ok(WorkerExit::Parked { control_request_id })
+            }
+            Ok(ChildWait::Aborted { control_request_id }) => {
+                Ok(WorkerExit::Aborted { control_request_id })
+            }
             Err(_) => Err(AppError::Channel(ChannelReaction::Fail)),
         }
     }
@@ -109,7 +133,15 @@ impl WorkerRunner for ProcessWorkerRunner {
 }
 
 impl ProcessWorkerRunner {
-    fn command(&self, workspace: &Path, secrets: Option<&Path>) -> Result<Command, AppError> {
+    fn command(
+        &self,
+        workspace: &Path,
+        control: &Path,
+        secrets: Option<&Path>,
+        work_id: &str,
+        execution_id: &str,
+        attempt_id: &str,
+    ) -> Result<Command, AppError> {
         match &self.sandbox {
             Sandbox::Bubblewrap { rootfs } => {
                 let mut cmd = Command::new("bwrap");
@@ -131,9 +163,10 @@ impl ProcessWorkerRunner {
                     "/proc",
                     "--dev",
                     "/dev",
-                    "--dir",
+                    "--tmpfs",
                     "/run",
                 ]);
+                cmd.args(["--bind"]).arg(control).arg("/run/workengine");
                 if let Some(secrets) = secrets {
                     cmd.args(["--ro-bind"]).arg(secrets).arg("/run/secrets");
                     for secret in &self.secret_files {
@@ -149,6 +182,15 @@ impl ProcessWorkerRunner {
             }
             Sandbox::Oci { engine, image } => {
                 let mut cmd = Command::new(engine);
+                let container = format!("workengine-{attempt_id}");
+                record_oci_owner(
+                    control,
+                    engine,
+                    &container,
+                    work_id,
+                    execution_id,
+                    attempt_id,
+                )?;
                 let uid = nix::unistd::Uid::current().as_raw().to_string();
                 let gid = nix::unistd::Gid::current().as_raw().to_string();
                 cmd.args([
@@ -163,12 +205,25 @@ impl ProcessWorkerRunner {
                     "no-new-privileges",
                     "--pids-limit",
                     "64",
+                    "--name",
+                    &container,
+                    "--label",
+                    &format!("workengine.work_id={work_id}"),
+                    "--label",
+                    &format!("workengine.execution_id={execution_id}"),
+                    "--label",
+                    &format!("workengine.attempt_id={attempt_id}"),
                     "--user",
                 ]);
                 cmd.arg(format!("{uid}:{gid}"));
+                cmd.arg("--cidfile").arg(control.join("container.cid"));
                 cmd.arg("--mount").arg(format!(
                     "type=bind,src={},dst=/workspace,rw",
                     workspace.display()
+                ));
+                cmd.arg("--mount").arg(format!(
+                    "type=bind,src={},dst=/run/workengine,rw",
+                    control.display()
                 ));
                 cmd.args(["--workdir", "/workspace"]);
                 if let Some(secrets) = secrets {
@@ -188,6 +243,93 @@ impl ProcessWorkerRunner {
             }
         }
     }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct OciOwner {
+    schema_version: u32,
+    engine: String,
+    container: String,
+    work_id: String,
+    execution_id: String,
+    attempt_id: String,
+}
+
+fn record_oci_owner(
+    control_root: &Path,
+    engine: &str,
+    container: &str,
+    work_id: &str,
+    execution_id: &str,
+    attempt_id: &str,
+) -> Result<(), AppError> {
+    let owner = OciOwner {
+        schema_version: 1,
+        engine: engine.to_owned(),
+        container: container.to_owned(),
+        work_id: work_id.to_owned(),
+        execution_id: execution_id.to_owned(),
+        attempt_id: attempt_id.to_owned(),
+    };
+    fs::write(
+        control_root.join("oci-owner.json"),
+        serde_json::to_vec(&owner).map_err(AppError::worker)?,
+    )
+    .map_err(AppError::worker)
+}
+
+pub(crate) fn reclaim_owned_container(
+    control_root: &Path,
+    work_id: &str,
+    execution_id: &str,
+    attempt_id: &str,
+) -> Result<bool, AppError> {
+    let bytes = match fs::read(control_root.join("oci-owner.json")) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(AppError::worker(error)),
+    };
+    let owner: OciOwner = serde_json::from_slice(&bytes).map_err(AppError::outcome_schema)?;
+    if owner.schema_version != 1
+        || owner.work_id != work_id
+        || owner.execution_id != execution_id
+        || owner.attempt_id != attempt_id
+    {
+        return Err(AppError::worker(
+            "OCI ownership proof does not match the active attempt",
+        ));
+    }
+    let inspected = Command::new(&owner.engine)
+        .args([
+            "inspect",
+            "--format",
+            "{{json .Config.Labels}}",
+            &owner.container,
+        ])
+        .output()
+        .map_err(AppError::worker)?;
+    if !inspected.status.success() {
+        return Ok(false);
+    }
+    let labels: std::collections::HashMap<String, String> =
+        serde_json::from_slice(&inspected.stdout).map_err(AppError::worker)?;
+    if labels.get("workengine.work_id").map(String::as_str) != Some(work_id)
+        || labels.get("workengine.execution_id").map(String::as_str) != Some(execution_id)
+        || labels.get("workengine.attempt_id").map(String::as_str) != Some(attempt_id)
+    {
+        return Err(AppError::worker(
+            "OCI labels do not prove attempt ownership",
+        ));
+    }
+    let removed = Command::new(&owner.engine)
+        .args(["rm", "--force", &owner.container])
+        .status()
+        .map_err(AppError::worker)?;
+    if !removed.success() {
+        return Err(AppError::worker("failed to tear down owned OCI container"));
+    }
+    Ok(true)
 }
 
 struct SecretDirectory(tempfile::TempDir);
@@ -256,6 +398,7 @@ fn persist_timed_out(root: &Path, profile: &str) -> Result<Outcome, AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
     use std::time::Duration;
     use workengine_application::DiscardAttemptRecorder;
     use workengine_domain::{AttemptId, ExecutionId, Work, WorkAttributes, WorkId};
@@ -278,14 +421,20 @@ mod tests {
         let execution_id = ExecutionId::parse("execution-test").unwrap();
         let attempt_id = AttemptId::parse("attempt-test").unwrap();
         let mut recorder = DiscardAttemptRecorder;
-        runner.run(&mut RunRequest {
+        match runner.run(&mut RunRequest {
             work,
             execution_id: &execution_id,
             attempt_id: &attempt_id,
             workspace_root,
+            control_root: workspace_root,
             budget,
             recorder: &mut recorder,
-        })
+        })? {
+            WorkerExit::Completed(outcome) => Ok(outcome),
+            WorkerExit::Parked { .. } | WorkerExit::Aborted { .. } => {
+                Err(AppError::worker("unexpected test control exit"))
+            }
+        }
     }
 
     fn sandbox(root: &tempfile::TempDir) -> Sandbox {
@@ -312,9 +461,62 @@ mod tests {
             .unwrap_or(true)
     }
 
+    fn sandbox_test_lock() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    #[test]
+    fn oci_command_carries_attempt_ownership_labels() {
+        let dir = tempfile::tempdir().unwrap();
+        let work = work();
+        let execution_id = ExecutionId::parse("execution-owner").unwrap();
+        let attempt_id = AttemptId::parse("attempt-owner").unwrap();
+        let mut recorder = DiscardAttemptRecorder;
+        let request = RunRequest {
+            work: &work,
+            execution_id: &execution_id,
+            attempt_id: &attempt_id,
+            workspace_root: dir.path(),
+            control_root: dir.path(),
+            budget: Duration::from_secs(1),
+            recorder: &mut recorder,
+        };
+        let runner = ProcessWorkerRunner::new(
+            vec!["worker".to_owned()],
+            Vec::new(),
+            Sandbox::Oci {
+                engine: "docker".to_owned(),
+                image: format!("example@sha256:{}", "1".repeat(64)),
+            },
+        )
+        .unwrap();
+        let command = runner
+            .command(
+                request.workspace_root,
+                request.control_root,
+                None,
+                work.id().as_str(),
+                execution_id.as_str(),
+                attempt_id.as_str(),
+            )
+            .unwrap();
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(args.contains(&"workengine.work_id=work-1".to_owned()));
+        assert!(args.contains(&"workengine.execution_id=execution-owner".to_owned()));
+        assert!(args.contains(&"workengine.attempt_id=attempt-owner".to_owned()));
+        assert!(dir.path().join("oci-owner.json").exists());
+    }
+
     #[cfg(unix)]
     #[test]
     fn missing_outcome_is_failed_not_succeeded() {
+        let _guard = sandbox_test_lock();
         if unavailable_sandbox() {
             return;
         }
@@ -335,6 +537,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn schema_outcome_file_is_decoded() {
+        let _guard = sandbox_test_lock();
         if unavailable_sandbox() {
             return;
         }
@@ -360,6 +563,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn undeclared_env_is_not_inherited() {
+        let _guard = sandbox_test_lock();
         if unavailable_sandbox() {
             return;
         }
@@ -392,6 +596,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn declared_secret_is_exposed_only_as_a_file_path() {
+        let _guard = sandbox_test_lock();
         if unavailable_sandbox() {
             return;
         }

@@ -16,7 +16,7 @@ Workengine is a hexagonal control plane. Layers are Cargo crates. A forbidden de
                    v
 +------------------------------------------------------+
 |  application                                          |
-|  create / next / start / complete / park             |
+|  create / next / start / complete / control / input  |
 |  ports = traits                                       |
 +------------------+-------------------+---------------+
                    |                   |
@@ -31,14 +31,15 @@ Workengine is a hexagonal control plane. Layers are Cargo crates. A forbidden de
          +----------------------------------------+
 ```
 
-The local HTTP adapter is an inbound observer plus deliberately narrow operator
-control. Its GET/SSE routes use the read-only query port and do not recover or
+The local HTTP adapter is the daemon transport, an inbound observer, and the
+operator control surface. Its GET/SSE routes use the read-only query port and do not recover or
 change Work. The query projection includes immutable execution specs, ordered
 attempts, heartbeat, bounded redacted process metadata, diagnostics, and a
-finite control-plane proof catalogue. `POST /api/v0/works` invokes application `create` with a goal and
-optional Worker profile; `POST /api/v0/works/{workId}/start` invokes the same
-foreground application start path as the CLI through a control supplied by the
-composition root. Publisher and other live controls remain later work.
+finite control-plane proof catalogue. Lifecycle routes invoke the daemon-owned
+application path through a control supplied by the composition root. CLI
+mutation commands are localhost clients of the same routes. Park, abort,
+resume, answer, and consent wait for server-confirmed state. Publishers remain
+later work.
 
 ## Crates
 
@@ -49,7 +50,7 @@ composition root. Publisher and other live controls remain later work.
 | `crates/adapters-store` | `workengine-adapters-store` | `WorkStore` implementations. |
 | `crates/adapters-worker` | `workengine-adapters-worker` | `WorkerRunner` implementations (stub and generic process). |
 | `crates/adapters-workspace` | `workengine-adapters-workspace` | `WorkspaceFactory` implementations. |
-| `crates/adapters-http` | `workengine-adapters-http` | Localhost-only HTTP/SSE observer, narrow Work intake, and embedded Web UI. |
+| `crates/adapters-http` | `workengine-adapters-http` | Localhost daemon transport, HTTP/SSE observer and control client, and embedded Web UI. |
 | `crates/cli` | `workengine-cli` (bin `workengine`) | Composition root. |
 
 `workengine-cli` depends on application and on adapters. `workengine-domain` depends on none of them.

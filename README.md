@@ -28,9 +28,12 @@ cargo build --release
 ./target/release/workengine version
 ```
 
-Create a Work, then run the built-in stub Worker:
+Start the local daemon, then create a Work and run the built-in stub Worker
+from another shell:
 
 ```bash
+./target/release/workengine serve
+
 ./target/release/workengine create --goal "say hello"
 # → <id> ready
 
@@ -60,9 +63,12 @@ A typical run looks like this:
 
 1. `create` saves the Work as `ready`. Nothing is spawned yet.
 2. `next` prints the next startable id.
-3. `start` binds a workspace, writes the goal, optionally copies a checkout,
-   runs the Worker, and completes.
-4. If a run is left `running`, the next execution invocation parks it for recovery. A
+3. `start` asks the daemon to bind a workspace, write the goal, run the Worker,
+   and confirm its result.
+4. `park` waits for a validated attempt checkpoint; `abort` tears the process
+   group down immediately and records `aborted` as the terminal reason.
+5. On restart the daemon tears down any exactly identified orphan process and
+   returns its unconfirmed Work to `parked` from the last confirmed point. A
    shared `outcome.json` is never trusted as a recovery authority.
 
 Workengine never asks a model which Work to take, or which status comes next.
@@ -74,19 +80,25 @@ Agent and tracker names stay in configuration and adapters, not in the core.
 | --- | --- |
 | `create --goal "<text>" [--profile stub]` | Persist a new Work as `ready` |
 | `next` | Print the next startable Work id |
-| `start --work <id> [--checkout <dir>]` | Bind a workspace, run the Worker, complete |
-| `park --work <id>` | Park leftover `running` Work |
-| `serve [--port 9410]` | Serve the localhost-only Web operator and observer |
+| `start --work <id>` | Ask the daemon to bind, run, and confirm Work |
+| `resume --work <id>` | Continue parked Work under the same execution |
+| `park --work <id>` | Request a checkpoint, then park running Work |
+| `abort --work <id>` | Tear down running Work without treating it as parked |
+| `answer --work <id> --answer "<text>"` | Record an answer and resume the same Work |
+| `consent --work <id> --action "<text>"` | Record explicit consent and resume the same Work |
+| `serve [--port 9410]` | Run the localhost daemon, Web operator, and observer |
 | `version` | Print `workengine <semver>` |
 
 `--data-dir` (or `WORKENGINE_DATA_DIR`) chooses the SQLite store and workspace
 directories. Default: `.workengine`.
 
-`serve` binds only to `127.0.0.1` and `::1`. Its browser UI and `/api/v0` API
-never read SQLite directly. The UI can create `ready` Work and explicitly start
-`ready` or `parked` Work using its locally configured profile. It cannot supply
-argv, secrets, sandbox, workspace, or budget settings, and it cannot park,
-abort, or complete Work directly. Each Work record includes its immutable
+Lifecycle commands use `--daemon-port` (or `WORKENGINE_DAEMON_PORT`) and require
+the matching local `serve` process. `serve` binds only to `127.0.0.1` and
+`::1`. Its browser UI and `/api/v0` API
+never read SQLite directly. The UI can create and start `ready` Work, resume
+parked Work, checkpoint-park or abort an active attempt, and record answers or
+explicit consent. It cannot supply argv, secrets, sandbox, workspace, or budget
+settings. Each Work record includes its immutable
 execution configuration, attempt/heartbeat/retry history, terminal diagnostics,
 redacted process metadata, and a finite catalogue of control-plane proof
 artifacts. Raw child output and workspace paths are not exposed. The API remains
@@ -133,8 +145,8 @@ Workengine is not an agent, not an LLM supervisor, and not a tracker client.
 
 ## Status
 
-Workengine is pre-1.0. What you can do today is the CLI above: create, run, and
-park. Inbound adapters and publishers come later. The exact released version is
+Workengine is pre-1.0. What you can do today is the local live-operator slice
+above. Inbound adapters and publishers come later. The exact released version is
 reported by `workengine version` and by the Git tag.
 
 Public contracts — command names, exit codes, schemas — live in

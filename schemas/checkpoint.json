@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://workengine.local/schemas/checkpoint-v1.json",
+  "title": "Workengine attempt checkpoint candidate",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "workId",
+    "executionId",
+    "attemptId",
+    "workerProfile"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "workId": { "type": "string", "minLength": 1 },
+    "executionId": { "type": "string", "minLength": 1 },
+    "attemptId": { "type": "string", "minLength": 1 },
+    "workerProfile": { "type": "string", "minLength": 1 }
+  }
+}

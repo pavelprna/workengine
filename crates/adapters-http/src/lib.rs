@@ -1,6 +1,8 @@
-//! Localhost-only HTTP adapter for operator intake, launch, and observation.
+//! Localhost daemon transport for lifecycle control and observation.
 
 use std::convert::Infallible;
+use std::io::{Read, Write};
+use std::net::TcpStream;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -13,11 +15,12 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
-use workengine_adapters_store::{SqliteObserver, SqliteStore};
+use workengine_adapters_store::SqliteObserver;
 use workengine_application::{
     AppError, AttemptObservation, AttemptState, ExecutionObservation, ProcessRecordObservation,
-    SequencedEvent, SystemClock, WorkQuery, create,
+    SequencedEvent, WorkQuery,
 };
+use workengine_domain::OutcomeKind;
 use workengine_domain::{AttemptId, ExecutionId, Work, WorkEvent, WorkId, WorkStatus};
 
 include!(concat!(env!("OUT_DIR"), "/web_assets.rs"));
@@ -26,24 +29,152 @@ const DEFAULT_PAGE_SIZE: usize = 50;
 const MAX_PAGE_SIZE: usize = 100;
 const CSP: &str = "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; connect-src 'self'; style-src 'self'; script-src 'self'";
 
+/// Small localhost-only client used by mutating CLI commands.
+pub struct LocalClient {
+    port: u16,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClientWork {
+    pub work_id: WorkId,
+    pub status: WorkStatus,
+    pub outcome_kind: Option<OutcomeKind>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClientWorkResponse {
+    work_id: String,
+    status: String,
+    outcome_kind: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ClientErrorResponse {
+    message: String,
+}
+
+impl LocalClient {
+    pub fn new(port: u16) -> Self {
+        Self { port }
+    }
+
+    pub fn create(&self, goal: &str, profile: &str) -> Result<ClientWork, AppError> {
+        self.post(
+            "/api/v0/works",
+            &serde_json::json!({"goal": goal, "workerProfile": profile}),
+        )
+    }
+
+    pub fn start(&self, id: &WorkId) -> Result<ClientWork, AppError> {
+        self.post(&format!("/api/v0/works/{id}/start"), &serde_json::json!({}))
+    }
+
+    pub fn resume(&self, id: &WorkId) -> Result<ClientWork, AppError> {
+        self.post(
+            &format!("/api/v0/works/{id}/resume"),
+            &serde_json::json!({}),
+        )
+    }
+
+    pub fn park(&self, id: &WorkId) -> Result<ClientWork, AppError> {
+        self.post(&format!("/api/v0/works/{id}/park"), &serde_json::json!({}))
+    }
+
+    pub fn abort(&self, id: &WorkId) -> Result<ClientWork, AppError> {
+        self.post(&format!("/api/v0/works/{id}/abort"), &serde_json::json!({}))
+    }
+
+    pub fn answer(&self, id: &WorkId, answer: &str) -> Result<ClientWork, AppError> {
+        self.post(
+            &format!("/api/v0/works/{id}/answer"),
+            &serde_json::json!({"answer": answer}),
+        )
+    }
+
+    pub fn consent(&self, id: &WorkId, action: &str) -> Result<ClientWork, AppError> {
+        self.post(
+            &format!("/api/v0/works/{id}/consent"),
+            &serde_json::json!({"action": action}),
+        )
+    }
+
+    fn post(&self, path: &str, body: &serde_json::Value) -> Result<ClientWork, AppError> {
+        let body = serde_json::to_vec(body).map_err(AppError::store)?;
+        let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, self.port)).map_err(|error| {
+            AppError::Conflict(format!(
+                "local daemon is unavailable on port {}: {error}",
+                self.port
+            ))
+        })?;
+        stream
+            .write_all(
+                format!(
+                    "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    self.port,
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .and_then(|()| stream.write_all(&body))
+            .map_err(AppError::store)?;
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).map_err(AppError::store)?;
+        decode_client_response(&response)
+    }
+}
+
+fn decode_client_response(response: &[u8]) -> Result<ClientWork, AppError> {
+    let split = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or_else(|| AppError::store("daemon returned an invalid HTTP response"))?;
+    let head = std::str::from_utf8(&response[..split]).map_err(AppError::store)?;
+    let status = head
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|value| value.parse::<u16>().ok())
+        .ok_or_else(|| AppError::store("daemon returned an invalid HTTP status"))?;
+    let body = &response[split + 4..];
+    if !(200..300).contains(&status) {
+        let error: ClientErrorResponse = serde_json::from_slice(body).map_err(AppError::store)?;
+        return Err(match status {
+            404 => AppError::store(error.message),
+            409 => AppError::Conflict(error.message),
+            _ => AppError::store(error.message),
+        });
+    }
+    let response: ClientWorkResponse = serde_json::from_slice(body).map_err(AppError::store)?;
+    Ok(ClientWork {
+        work_id: WorkId::parse(response.work_id)?,
+        status: response.status.parse()?,
+        outcome_kind: response.outcome_kind.map(|kind| kind.parse()).transpose()?,
+    })
+}
+
 #[derive(Clone)]
 struct ObserverState {
     query: Arc<Mutex<SqliteObserver>>,
-    intake: Arc<Mutex<SqliteStore>>,
     version: String,
-    control: Arc<dyn StartControl>,
+    control: Arc<dyn LifecycleControl>,
 }
 
-/// Foreground local launch supplied by the CLI composition root.
-pub trait StartControl: Send + Sync + 'static {
+/// Local lifecycle writer supplied by the CLI composition root.
+pub trait LifecycleControl: Send + Sync + 'static {
+    fn create(&self, goal: String, profile: String) -> Result<Work, AppError>;
     fn start(&self, id: &WorkId) -> Result<Work, AppError>;
+    fn resume(&self, id: &WorkId) -> Result<Work, AppError>;
+    fn park(&self, id: &WorkId) -> Result<Work, AppError>;
+    fn abort(&self, id: &WorkId) -> Result<Work, AppError>;
+    fn answer(&self, id: &WorkId, answer: String) -> Result<Work, AppError>;
+    fn consent(&self, id: &WorkId, action: String) -> Result<Work, AppError>;
 }
 
-/// Run the local API until the process receives an interrupt.
+/// Run the local daemon API until the process receives an interrupt.
 pub fn serve(
-    intake: SqliteStore,
     observer: SqliteObserver,
-    control: Arc<dyn StartControl>,
+    control: Arc<dyn LifecycleControl>,
     port: u16,
     version: String,
 ) -> Result<(), AppError> {
@@ -54,7 +185,6 @@ pub fn serve(
     runtime.block_on(async move {
         let state = ObserverState {
             query: Arc::new(Mutex::new(observer)),
-            intake: Arc::new(Mutex::new(intake)),
             version,
             control,
         };
@@ -79,6 +209,11 @@ fn router(state: ObserverState) -> Router {
         .route("/api/v0/works", get(list_works).post(create_work))
         .route("/api/v0/works/{work_id}", get(show_work))
         .route("/api/v0/works/{work_id}/start", post(start_work))
+        .route("/api/v0/works/{work_id}/resume", post(resume_work))
+        .route("/api/v0/works/{work_id}/park", post(park_work))
+        .route("/api/v0/works/{work_id}/abort", post(abort_work))
+        .route("/api/v0/works/{work_id}/answer", post(answer_work))
+        .route("/api/v0/works/{work_id}/consent", post(consent_work))
         .route(
             "/api/v0/works/{work_id}/observation",
             get(show_observation),
@@ -283,6 +418,18 @@ struct CreateWorkRequest {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AnswerRequest {
+    answer: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConsentRequest {
+    action: String,
+}
+
+#[derive(Deserialize)]
 struct EventsParams {
     after: Option<String>,
     #[serde(rename = "workId")]
@@ -327,14 +474,15 @@ async fn create_work(
     State(state): State<ObserverState>,
     Json(request): Json<CreateWorkRequest>,
 ) -> Result<(StatusCode, Json<WorkResponse>), ApiError> {
-    let work = with_intake(&state, |store| {
-        create(
-            store,
-            &SystemClock,
+    let control = state.control.clone();
+    let work = tokio::task::spawn_blocking(move || {
+        control.create(
             request.goal,
             request.worker_profile.unwrap_or_else(|| "stub".to_owned()),
         )
     })
+    .await
+    .map_err(|error| ApiError::internal(format!("create task failed: {error}")))?
     .map_err(ApiError::from_create)?;
     Ok((StatusCode::CREATED, Json(work_response(&state, &work)?)))
 }
@@ -396,6 +544,69 @@ async fn start_work(
     let work = tokio::task::spawn_blocking(move || control.start(&id))
         .await
         .map_err(|error| ApiError::internal(format!("start task failed: {error}")))?
+        .map_err(ApiError::from_start)?;
+    Ok(Json(work_response(&state, &work)?))
+}
+
+async fn resume_work(
+    State(state): State<ObserverState>,
+    Path(work_id): Path<String>,
+) -> Result<Json<WorkResponse>, ApiError> {
+    run_control(state, work_id, |control, id| control.resume(id)).await
+}
+
+async fn park_work(
+    State(state): State<ObserverState>,
+    Path(work_id): Path<String>,
+) -> Result<Json<WorkResponse>, ApiError> {
+    run_control(state, work_id, |control, id| control.park(id)).await
+}
+
+async fn abort_work(
+    State(state): State<ObserverState>,
+    Path(work_id): Path<String>,
+) -> Result<Json<WorkResponse>, ApiError> {
+    run_control(state, work_id, |control, id| control.abort(id)).await
+}
+
+async fn answer_work(
+    State(state): State<ObserverState>,
+    Path(work_id): Path<String>,
+    Json(request): Json<AnswerRequest>,
+) -> Result<Json<WorkResponse>, ApiError> {
+    let id = WorkId::parse(work_id).map_err(ApiError::bad_request)?;
+    let control = state.control.clone();
+    let work = tokio::task::spawn_blocking(move || control.answer(&id, request.answer))
+        .await
+        .map_err(|error| ApiError::internal(format!("answer task failed: {error}")))?
+        .map_err(ApiError::from_start)?;
+    Ok(Json(work_response(&state, &work)?))
+}
+
+async fn consent_work(
+    State(state): State<ObserverState>,
+    Path(work_id): Path<String>,
+    Json(request): Json<ConsentRequest>,
+) -> Result<Json<WorkResponse>, ApiError> {
+    let id = WorkId::parse(work_id).map_err(ApiError::bad_request)?;
+    let control = state.control.clone();
+    let work = tokio::task::spawn_blocking(move || control.consent(&id, request.action))
+        .await
+        .map_err(|error| ApiError::internal(format!("consent task failed: {error}")))?
+        .map_err(ApiError::from_start)?;
+    Ok(Json(work_response(&state, &work)?))
+}
+
+async fn run_control(
+    state: ObserverState,
+    work_id: String,
+    invoke: impl FnOnce(&dyn LifecycleControl, &WorkId) -> Result<Work, AppError> + Send + 'static,
+) -> Result<Json<WorkResponse>, ApiError> {
+    let id = WorkId::parse(work_id).map_err(ApiError::bad_request)?;
+    let control = state.control.clone();
+    let work = tokio::task::spawn_blocking(move || invoke(control.as_ref(), &id))
+        .await
+        .map_err(|error| ApiError::internal(format!("control task failed: {error}")))?
         .map_err(ApiError::from_start)?;
     Ok(Json(work_response(&state, &work)?))
 }
@@ -601,17 +812,6 @@ fn with_query<T>(
         .lock()
         .map_err(|_| ApiError::internal("observer query lock poisoned"))?;
     operation(&query).map_err(ApiError::from)
-}
-
-fn with_intake<T>(
-    state: &ObserverState,
-    operation: impl FnOnce(&mut SqliteStore) -> Result<T, AppError>,
-) -> Result<T, AppError> {
-    let mut intake = state
-        .intake
-        .lock()
-        .map_err(|_| AppError::store("operator intake lock poisoned"))?;
-    operation(&mut intake)
 }
 
 fn work_response(state: &ObserverState, work: &Work) -> Result<WorkResponse, ApiError> {
@@ -988,6 +1188,8 @@ impl IntoResponse for ApiError {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use axum::body::{Body, to_bytes};
     use axum::http::Request;
     use serde_json::Value;
@@ -1003,10 +1205,39 @@ mod tests {
 
     use super::*;
 
-    struct DisabledStart;
+    struct TestControl(PathBuf);
 
-    impl StartControl for DisabledStart {
+    impl LifecycleControl for TestControl {
+        fn create(&self, goal: String, profile: String) -> Result<Work, AppError> {
+            create(
+                &mut SqliteStore::open(&self.0)?,
+                &SystemClock,
+                goal,
+                profile,
+            )
+        }
+
         fn start(&self, id: &WorkId) -> Result<Work, AppError> {
+            Err(AppError::NotFound(id.clone()))
+        }
+
+        fn resume(&self, id: &WorkId) -> Result<Work, AppError> {
+            Err(AppError::NotFound(id.clone()))
+        }
+
+        fn park(&self, id: &WorkId) -> Result<Work, AppError> {
+            Err(AppError::NotFound(id.clone()))
+        }
+
+        fn abort(&self, id: &WorkId) -> Result<Work, AppError> {
+            Err(AppError::NotFound(id.clone()))
+        }
+
+        fn answer(&self, id: &WorkId, _answer: String) -> Result<Work, AppError> {
+            Err(AppError::NotFound(id.clone()))
+        }
+
+        fn consent(&self, id: &WorkId, _action: String) -> Result<Work, AppError> {
             Err(AppError::NotFound(id.clone()))
         }
     }
@@ -1014,9 +1245,8 @@ mod tests {
     fn observer_state(directory: &std::path::Path) -> ObserverState {
         ObserverState {
             query: Arc::new(Mutex::new(SqliteObserver::open(directory).unwrap())),
-            intake: Arc::new(Mutex::new(SqliteStore::open(directory).unwrap())),
             version: "test".to_owned(),
-            control: Arc::new(DisabledStart),
+            control: Arc::new(TestControl(directory.to_path_buf())),
         }
     }
 

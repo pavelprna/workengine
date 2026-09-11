@@ -2,7 +2,9 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 fn bin() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_workengine"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_workengine"));
+    command.env("WORKENGINE_DIRECT_CONTROL", "true");
+    command
 }
 
 fn stdout(output: &std::process::Output) -> String {
@@ -89,6 +91,33 @@ fn wait_for_http(port: u16, request: &[u8]) -> String {
     panic!("server did not answer before deadline: {last_error:?}")
 }
 
+fn reserve_port() -> Option<u16> {
+    let listener = match std::net::TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => listener,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return None,
+        Err(error) => panic!("reserve localhost port: {error}"),
+    };
+    Some(listener.local_addr().unwrap().port())
+}
+
+fn daemon_client(port: u16) -> Command {
+    let mut command = bin();
+    command.env_remove("WORKENGINE_DIRECT_CONTROL");
+    command.args(["--daemon-port", &port.to_string()]);
+    command
+}
+
+fn wait_for_status(data_dir: &std::path::Path, id: &str, expected: &str) {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        if status_and_event_count(data_dir, id).0 == expected {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("Work {id} did not reach {expected}");
+}
+
 #[test]
 fn version_prints_package_version() {
     let output = bin().arg("version").output().unwrap();
@@ -167,7 +196,7 @@ fn read_commands_do_not_recover_running_work() {
 }
 
 #[test]
-fn serve_exposes_embedded_health_without_recovery() {
+fn serve_reconciles_before_exposing_health() {
     use std::net::TcpListener;
 
     let directory = tempfile::tempdir().unwrap();
@@ -203,7 +232,7 @@ fn serve_exposes_embedded_health_without_recovery() {
     );
     assert_eq!(
         status_and_event_count(directory.path(), &id),
-        ("running".to_owned(), 1)
+        ("parked".to_owned(), 2)
     );
 }
 
@@ -263,6 +292,349 @@ fn serve_starts_work_through_the_local_control_route() {
     assert_eq!(
         status_and_event_count(directory.path(), &id),
         ("succeeded".to_owned(), 3)
+    );
+}
+
+#[test]
+fn cli_mutations_are_clients_of_the_daemon_api() {
+    let Some(port) = reserve_port() else { return };
+    let directory = tempfile::tempdir().unwrap();
+    let mut server = bin()
+        .args([
+            "--data-dir",
+            directory.path().to_str().unwrap(),
+            "serve",
+            "--port",
+            &port.to_string(),
+        ])
+        .spawn()
+        .unwrap();
+    wait_for_http(
+        port,
+        b"GET /api/v0/health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    let created = daemon_client(port)
+        .args(["create", "--goal", "through-daemon"])
+        .output()
+        .unwrap();
+    assert!(
+        created.status.success(),
+        "create: {}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let id = stdout(&created)
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_owned();
+    let started = daemon_client(port)
+        .args(["start", "--work", &id])
+        .output()
+        .unwrap();
+    let _ = server.kill();
+    let _ = server.wait();
+    assert!(
+        started.status.success(),
+        "start: {}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    assert!(stdout(&started).ends_with(" succeeded"));
+}
+
+#[test]
+fn one_data_directory_has_one_daemon_owner() {
+    let Some(first_port) = reserve_port() else {
+        return;
+    };
+    let Some(second_port) = reserve_port() else {
+        return;
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let mut first = bin()
+        .args([
+            "--data-dir",
+            directory.path().to_str().unwrap(),
+            "serve",
+            "--port",
+            &first_port.to_string(),
+        ])
+        .spawn()
+        .unwrap();
+    wait_for_http(
+        first_port,
+        b"GET /api/v0/health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    let second = bin()
+        .args([
+            "--data-dir",
+            directory.path().to_str().unwrap(),
+            "serve",
+            "--port",
+            &second_port.to_string(),
+        ])
+        .output()
+        .unwrap();
+    let _ = first.kill();
+    let _ = first.wait();
+    assert_eq!(second.status.code(), Some(11));
+    assert!(String::from_utf8_lossy(&second.stderr).contains("another daemon owns"));
+}
+
+#[cfg(unix)]
+#[test]
+fn live_park_and_abort_are_confirmed_and_resume_keeps_execution() {
+    let Some(port) = reserve_port() else { return };
+    let directory = tempfile::tempdir().unwrap();
+    let mut server = bin()
+        .env("WORKENGINE_STUB_BEHAVIOR", "await_control")
+        .env("WORKENGINE_BUDGET_MS", "4000")
+        .args([
+            "--data-dir",
+            directory.path().to_str().unwrap(),
+            "serve",
+            "--port",
+            &port.to_string(),
+        ])
+        .spawn()
+        .unwrap();
+    wait_for_http(
+        port,
+        b"GET /api/v0/health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    let created = daemon_client(port)
+        .args(["create", "--goal", "interrupt-me"])
+        .output()
+        .unwrap();
+    assert!(created.status.success());
+    let id = stdout(&created)
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_owned();
+    let mut first = daemon_client(port)
+        .args(["start", "--work", &id])
+        .spawn()
+        .unwrap();
+    wait_for_status(directory.path(), &id, "running");
+    let parked = daemon_client(port)
+        .args(["park", "--work", &id])
+        .output()
+        .unwrap();
+    assert!(
+        parked.status.success(),
+        "park: {}",
+        String::from_utf8_lossy(&parked.stderr)
+    );
+    assert!(first.wait().unwrap().success());
+
+    let mut second = daemon_client(port)
+        .args(["resume", "--work", &id])
+        .spawn()
+        .unwrap();
+    wait_for_status(directory.path(), &id, "running");
+    let aborted = daemon_client(port)
+        .args(["abort", "--work", &id])
+        .output()
+        .unwrap();
+    assert!(
+        aborted.status.success(),
+        "abort: {}",
+        String::from_utf8_lossy(&aborted.stderr)
+    );
+    assert_eq!(second.wait().unwrap().code(), Some(1));
+    let _ = server.kill();
+    let _ = server.wait();
+
+    let connection =
+        rusqlite::Connection::open(directory.path().join("workengine.sqlite")).unwrap();
+    let (executions, attempts, checkpoints, aborted_reason): (i64, i64, i64, String) = connection
+        .query_row(
+            "SELECT
+               (SELECT COUNT(*) FROM executions WHERE work_id = ?1),
+               (SELECT COUNT(*) FROM attempts JOIN executions ON executions.id = attempts.execution_id WHERE executions.work_id = ?1),
+               (SELECT COUNT(*) FROM attempts JOIN executions ON executions.id = attempts.execution_id WHERE executions.work_id = ?1 AND checkpoint_recorded = 1),
+               (SELECT terminal_reason FROM attempts JOIN executions ON executions.id = attempts.execution_id WHERE executions.work_id = ?1 ORDER BY attempts.created_at_unix_ms DESC, attempts.id DESC LIMIT 1)",
+            [&id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!((executions, attempts, checkpoints), (1, 2, 1));
+    assert_eq!(aborted_reason, "aborted");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn daemon_restart_reclaims_the_owned_process_group_and_lease() {
+    let Some(port) = reserve_port() else { return };
+    let directory = tempfile::tempdir().unwrap();
+    let port_string = port.to_string();
+    let server_args = [
+        "--data-dir",
+        directory.path().to_str().unwrap(),
+        "serve",
+        "--port",
+        &port_string,
+    ];
+    let mut server = bin()
+        .env("WORKENGINE_STUB_BEHAVIOR", "await_control")
+        .env("WORKENGINE_BUDGET_MS", "10000")
+        .args(server_args)
+        .spawn()
+        .unwrap();
+    wait_for_http(
+        port,
+        b"GET /api/v0/health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    let created = daemon_client(port)
+        .args(["create", "--goal", "survive-daemon-crash"])
+        .output()
+        .unwrap();
+    let id = stdout(&created)
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_owned();
+    let mut start_client = daemon_client(port)
+        .args(["start", "--work", &id])
+        .spawn()
+        .unwrap();
+    wait_for_status(directory.path(), &id, "running");
+    let owner_path = {
+        let connection =
+            rusqlite::Connection::open(directory.path().join("workengine.sqlite")).unwrap();
+        let (execution, attempt): (String, String) = connection
+            .query_row(
+                "SELECT active_execution_id, active_attempt_id FROM works WHERE id = ?1",
+                [&id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        directory
+            .path()
+            .join("control")
+            .join(&id)
+            .join(execution)
+            .join(attempt)
+            .join("runtime-owner.json")
+    };
+    let owner: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(owner_path).unwrap()).unwrap();
+    let pid = owner["pid"].as_u64().unwrap() as i32;
+    server.kill().unwrap();
+    server.wait().unwrap();
+    let _ = start_client.wait();
+
+    let mut restarted = bin()
+        .env("WORKENGINE_STUB_BEHAVIOR", "await_control")
+        .args(server_args)
+        .spawn()
+        .unwrap();
+    wait_for_http(
+        port,
+        b"GET /api/v0/health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    let _ = restarted.kill();
+    let _ = restarted.wait();
+    std::thread::sleep(Duration::from_millis(80));
+    assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
+    assert_eq!(status_and_event_count(directory.path(), &id).0, "parked");
+    let connection =
+        rusqlite::Connection::open(directory.path().join("workengine.sqlite")).unwrap();
+    let reason: String = connection
+        .query_row(
+            "SELECT terminal_reason FROM attempts JOIN executions ON executions.id = attempts.execution_id WHERE executions.work_id = ?1 ORDER BY attempts.created_at_unix_ms DESC LIMIT 1",
+            [&id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(reason, "crash_reclaimed");
+}
+
+#[test]
+fn answer_and_consent_continue_the_same_work_and_execution() {
+    let Some(port) = reserve_port() else { return };
+    let directory = tempfile::tempdir().unwrap();
+    let mut server = bin()
+        .env("WORKENGINE_STUB_BEHAVIOR", "channel_park")
+        .args([
+            "--data-dir",
+            directory.path().to_str().unwrap(),
+            "serve",
+            "--port",
+            &port.to_string(),
+        ])
+        .spawn()
+        .unwrap();
+    wait_for_http(
+        port,
+        b"GET /api/v0/health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    let created = daemon_client(port)
+        .args(["create", "--goal", "ask-me"])
+        .output()
+        .unwrap();
+    let id = stdout(&created)
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_owned();
+    let first = daemon_client(port)
+        .args(["start", "--work", &id])
+        .output()
+        .unwrap();
+    assert!(first.status.success());
+    assert!(stdout(&first).ends_with(" parked"));
+    let answered = daemon_client(port)
+        .args(["answer", "--work", &id, "--answer", "use option B"])
+        .output()
+        .unwrap();
+    assert!(answered.status.success());
+    assert!(stdout(&answered).starts_with(&id));
+    let consented = daemon_client(port)
+        .args([
+            "consent",
+            "--work",
+            &id,
+            "--action",
+            "publish local artifact",
+        ])
+        .output()
+        .unwrap();
+    assert!(consented.status.success());
+    let _ = server.kill();
+    let _ = server.wait();
+
+    let connection =
+        rusqlite::Connection::open(directory.path().join("workengine.sqlite")).unwrap();
+    let executions: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM executions WHERE work_id = ?1",
+            [&id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let attempts: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM attempts JOIN executions ON executions.id = attempts.execution_id WHERE executions.work_id = ?1",
+            [&id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let inputs: Vec<(String, String)> = connection
+        .prepare("SELECT kind, body FROM operator_inputs WHERE work_id = ?1 ORDER BY id")
+        .unwrap()
+        .query_map([&id], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(executions, 1);
+    assert_eq!(attempts, 3);
+    assert_eq!(
+        inputs,
+        vec![
+            ("answer".to_owned(), "use option B".to_owned()),
+            ("consent".to_owned(), "publish local artifact".to_owned()),
+        ]
     );
 }
 

@@ -13,7 +13,7 @@ use crate::clock::Clock;
 use crate::error::{AppError, ChannelReaction};
 use crate::ports::{
     AttemptClaim, AttemptRecorder, BindRequest, ExecutionObservation, ProcessEvent, RunRequest,
-    SequencedEvent, StartRequest, WorkQuery, WorkStore, WorkerRunner, WorkspaceFactory,
+    SequencedEvent, StartRequest, WorkQuery, WorkStore, WorkerExit, WorkerRunner, WorkspaceFactory,
 };
 use crate::{complete, create, next, park, recover_unconfirmed, start};
 
@@ -250,13 +250,14 @@ impl FakeRunner {
 }
 
 impl WorkerRunner for FakeRunner {
-    fn run(&self, request: &mut RunRequest<'_>) -> Result<Outcome, AppError> {
+    fn run(&self, request: &mut RunRequest<'_>) -> Result<WorkerExit, AppError> {
         self.runs.set(self.runs.get() + 1);
         Outcome::new(
             OUTCOME_SCHEMA_VERSION,
             self.kind,
             request.work.attributes().worker_profile(),
         )
+        .map(WorkerExit::Completed)
         .map_err(AppError::from)
     }
 
@@ -619,7 +620,7 @@ fn started_and_completed_events_use_clock_not_work_birth() {
 struct BoomRunner;
 
 impl WorkerRunner for BoomRunner {
-    fn run(&self, _request: &mut RunRequest<'_>) -> Result<Outcome, AppError> {
+    fn run(&self, _request: &mut RunRequest<'_>) -> Result<WorkerExit, AppError> {
         Err(AppError::worker("spawn failed"))
     }
 
@@ -647,11 +648,16 @@ struct ChannelRunner {
 }
 
 impl WorkerRunner for ChannelRunner {
-    fn run(&self, request: &mut RunRequest<'_>) -> Result<Outcome, AppError> {
+    fn run(&self, request: &mut RunRequest<'_>) -> Result<WorkerExit, AppError> {
         let i = self.runs.get() as usize;
         self.runs.set(self.runs.get() + 1);
         if i < self.reactions.len() {
-            return Err(AppError::Channel(self.reactions[i]));
+            return match self.reactions[i] {
+                ChannelReaction::Park => Ok(WorkerExit::Parked {
+                    control_request_id: None,
+                }),
+                reaction => Err(AppError::Channel(reaction)),
+            };
         }
         let kind = self.then.unwrap_or(OutcomeKind::Succeeded);
         Outcome::new(
@@ -659,6 +665,7 @@ impl WorkerRunner for ChannelRunner {
             kind,
             request.work.attributes().worker_profile(),
         )
+        .map(WorkerExit::Completed)
         .map_err(AppError::from)
     }
 

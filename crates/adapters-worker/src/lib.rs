@@ -6,7 +6,7 @@ use std::process::Command;
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
-use workengine_application::{AppError, ChannelReaction, RunRequest, WorkerRunner};
+use workengine_application::{AppError, ChannelReaction, RunRequest, WorkerExit, WorkerRunner};
 use workengine_domain::{OUTCOME_SCHEMA_VERSION, Outcome, OutcomeKind};
 
 mod process;
@@ -18,7 +18,20 @@ pub use stream::{
     EVENT_CHILD_STDERR, EVENT_CHILD_STDOUT, EVENT_EXITED, EVENT_KILLED, EVENT_SPAWNED,
     STREAM_EVENTS, STREAM_SCHEMA_VERSION, record_line,
 };
-use supervise::{ChildWait, spawn_supervised};
+use supervise::{ChildWait, spawn_supervised, write_checkpoint_candidate};
+
+pub fn reclaim_owned_process(
+    control_root: &Path,
+    work_id: &str,
+    execution_id: &str,
+    attempt_id: &str,
+) -> Result<bool, AppError> {
+    let container =
+        process::reclaim_owned_container(control_root, work_id, execution_id, attempt_id)?;
+    let process =
+        supervise::reclaim_runtime_owner(control_root, work_id, execution_id, attempt_id)?;
+    Ok(container || process)
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StubBehavior {
@@ -29,6 +42,7 @@ pub enum StubBehavior {
     ChannelFail,
     ChannelPark,
     ChannelRetry,
+    AwaitControl,
 }
 
 impl FromStr for StubBehavior {
@@ -43,6 +57,7 @@ impl FromStr for StubBehavior {
             "channel_fail" => Ok(Self::ChannelFail),
             "channel_park" => Ok(Self::ChannelPark),
             "channel_retry" => Ok(Self::ChannelRetry),
+            "await_control" => Ok(Self::AwaitControl),
             other => Err(format!("unknown stub behavior {other}")),
         }
     }
@@ -70,7 +85,7 @@ struct OutcomeDto {
 }
 
 impl WorkerRunner for StubWorkerRunner {
-    fn run(&self, request: &mut RunRequest<'_>) -> Result<Outcome, AppError> {
+    fn run(&self, request: &mut RunRequest<'_>) -> Result<WorkerExit, AppError> {
         let profile = request.work.attributes().worker_profile();
         match self.behavior {
             StubBehavior::Hang => run_hang(request, profile),
@@ -78,14 +93,67 @@ impl WorkerRunner for StubWorkerRunner {
             StubBehavior::Fail => run_writer(request, OutcomeKind::Failed, profile),
             StubBehavior::ExceedBudget => run_budget(request, profile),
             StubBehavior::ChannelFail => Err(AppError::Channel(ChannelReaction::Fail)),
-            StubBehavior::ChannelPark => Err(AppError::Channel(ChannelReaction::Park)),
+            StubBehavior::ChannelPark => {
+                write_checkpoint_candidate(request)?;
+                request.recorder.record_checkpoint(
+                    request.work.id(),
+                    request.execution_id,
+                    request.attempt_id,
+                    now_unix_ms()?,
+                )?;
+                Ok(WorkerExit::Parked {
+                    control_request_id: None,
+                })
+            }
             StubBehavior::ChannelRetry => Err(AppError::Channel(ChannelReaction::Retry)),
+            StubBehavior::AwaitControl => run_await_control(request),
         }
     }
 
     fn decode(&self, bytes: &[u8]) -> Result<Outcome, AppError> {
         decode_outcome(bytes)
     }
+}
+
+fn run_await_control(request: &mut RunRequest<'_>) -> Result<WorkerExit, AppError> {
+    fs::create_dir_all(request.control_root).map_err(AppError::worker)?;
+    let candidate = serde_json::json!({
+        "schemaVersion": 1,
+        "workId": request.work.id().as_str(),
+        "executionId": request.execution_id.as_str(),
+        "attemptId": request.attempt_id.as_str(),
+        "workerProfile": request.work.attributes().worker_profile(),
+    });
+    fs::write(
+        request.control_root.join(".checkpoint-payload.json"),
+        serde_json::to_vec(&candidate).map_err(AppError::worker)?,
+    )
+    .map_err(AppError::worker)?;
+    let mut cmd = Command::new("sh");
+    cmd.args([
+        "-c",
+        "while [ ! -f checkpoint-request.json ]; do sleep 0.01; done; cp .checkpoint-payload.json checkpoint.json; while :; do sleep 1; done",
+    ])
+    .current_dir(request.control_root);
+    match spawn_supervised(cmd, request)? {
+        ChildWait::Parked { control_request_id } => Ok(WorkerExit::Parked { control_request_id }),
+        ChildWait::Aborted { control_request_id } => Ok(WorkerExit::Aborted { control_request_id }),
+        ChildWait::BudgetExceeded => persist_outcome(
+            request.workspace_root,
+            OutcomeKind::BudgetExceeded,
+            request.work.attributes().worker_profile(),
+        )
+        .map(WorkerExit::Completed),
+        ChildWait::Exited { .. } => Err(AppError::worker("control stub exited unexpectedly")),
+    }
+}
+
+fn now_unix_ms() -> Result<u64, AppError> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(AppError::worker)?;
+    Ok(u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
 }
 
 pub fn decode_outcome(bytes: &[u8]) -> Result<Outcome, AppError> {
@@ -115,7 +183,7 @@ fn run_writer(
     request: &mut RunRequest<'_>,
     kind: OutcomeKind,
     profile: &str,
-) -> Result<Outcome, AppError> {
+) -> Result<WorkerExit, AppError> {
     fs::create_dir_all(request.workspace_root).map_err(AppError::worker)?;
     let outcome = Outcome::new(OUTCOME_SCHEMA_VERSION, kind, profile).map_err(AppError::from)?;
     let json = encode_outcome(&outcome)?;
@@ -128,14 +196,17 @@ fn run_writer(
         .current_dir(request.workspace_root);
     match spawn_supervised(cmd, request)? {
         ChildWait::Exited { success: true } => {
-            decode_outcome(&fs::read(&dest).map_err(AppError::worker)?)
+            decode_outcome(&fs::read(&dest).map_err(AppError::worker)?).map(WorkerExit::Completed)
         }
         ChildWait::Exited { success: false } => {
             Err(AppError::worker("stub worker exited unsuccessfully"))
         }
         ChildWait::BudgetExceeded => {
             persist_outcome(request.workspace_root, OutcomeKind::BudgetExceeded, profile)
+                .map(WorkerExit::Completed)
         }
+        ChildWait::Parked { control_request_id } => Ok(WorkerExit::Parked { control_request_id }),
+        ChildWait::Aborted { control_request_id } => Ok(WorkerExit::Aborted { control_request_id }),
     }
 }
 
@@ -146,7 +217,7 @@ fn persist_outcome(root: &Path, kind: OutcomeKind, profile: &str) -> Result<Outc
     Ok(outcome)
 }
 
-fn run_budget(request: &mut RunRequest<'_>, profile: &str) -> Result<Outcome, AppError> {
+fn run_budget(request: &mut RunRequest<'_>, profile: &str) -> Result<WorkerExit, AppError> {
     fs::create_dir_all(request.workspace_root).map_err(AppError::worker)?;
     let mut cmd = Command::new("sh");
     cmd.arg("-c")
@@ -155,12 +226,15 @@ fn run_budget(request: &mut RunRequest<'_>, profile: &str) -> Result<Outcome, Ap
     match spawn_supervised(cmd, request)? {
         ChildWait::BudgetExceeded => {
             persist_outcome(request.workspace_root, OutcomeKind::BudgetExceeded, profile)
+                .map(WorkerExit::Completed)
         }
         ChildWait::Exited { .. } => Err(AppError::worker("budget stub exited before budget")),
+        ChildWait::Parked { control_request_id } => Ok(WorkerExit::Parked { control_request_id }),
+        ChildWait::Aborted { control_request_id } => Ok(WorkerExit::Aborted { control_request_id }),
     }
 }
 
-fn run_hang(request: &mut RunRequest<'_>, profile: &str) -> Result<Outcome, AppError> {
+fn run_hang(request: &mut RunRequest<'_>, profile: &str) -> Result<WorkerExit, AppError> {
     fs::create_dir_all(request.workspace_root).map_err(AppError::worker)?;
     let mut cmd = Command::new("sh");
     cmd.arg("-c")
@@ -169,8 +243,11 @@ fn run_hang(request: &mut RunRequest<'_>, profile: &str) -> Result<Outcome, AppE
     match spawn_supervised(cmd, request)? {
         ChildWait::BudgetExceeded => {
             persist_outcome(request.workspace_root, OutcomeKind::TimedOut, profile)
+                .map(WorkerExit::Completed)
         }
         ChildWait::Exited { .. } => Err(AppError::worker("hang stub exited before budget")),
+        ChildWait::Parked { control_request_id } => Ok(WorkerExit::Parked { control_request_id }),
+        ChildWait::Aborted { control_request_id } => Ok(WorkerExit::Aborted { control_request_id }),
     }
 }
 
@@ -199,14 +276,20 @@ mod tests {
         let execution_id = ExecutionId::parse("execution-test").unwrap();
         let attempt_id = AttemptId::parse("attempt-test").unwrap();
         let mut recorder = DiscardAttemptRecorder;
-        runner.run(&mut RunRequest {
+        match runner.run(&mut RunRequest {
             work,
             execution_id: &execution_id,
             attempt_id: &attempt_id,
             workspace_root,
+            control_root: workspace_root,
             budget,
             recorder: &mut recorder,
-        })
+        })? {
+            WorkerExit::Completed(outcome) => Ok(outcome),
+            WorkerExit::Parked { .. } | WorkerExit::Aborted { .. } => {
+                Err(AppError::worker("unexpected test control exit"))
+            }
+        }
     }
 
     #[test]
@@ -333,6 +416,7 @@ mod tests {
                 execution_id: &execution_id,
                 attempt_id: &attempt_id,
                 workspace_root: dir.path(),
+                control_root: dir.path(),
                 budget: Duration::from_secs(2),
                 recorder: &mut recorder,
             })
@@ -399,14 +483,6 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err_channel(&fail), ChannelReaction::Fail));
-        let park = run(
-            &StubWorkerRunner::new(StubBehavior::ChannelPark),
-            &work,
-            dir.path(),
-            Duration::from_secs(1),
-        )
-        .unwrap_err();
-        assert!(matches!(err_channel(&park), ChannelReaction::Park));
         let retry = run(
             &StubWorkerRunner::new(StubBehavior::ChannelRetry),
             &work,
@@ -415,6 +491,33 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err_channel(&retry), ChannelReaction::Retry));
+    }
+
+    #[test]
+    fn channel_park_produces_an_attempt_scoped_checkpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let work = work();
+        let execution_id = ExecutionId::parse("execution-park").unwrap();
+        let attempt_id = AttemptId::parse("attempt-park").unwrap();
+        let mut recorder = DiscardAttemptRecorder;
+        let exit = StubWorkerRunner::new(StubBehavior::ChannelPark)
+            .run(&mut RunRequest {
+                work: &work,
+                execution_id: &execution_id,
+                attempt_id: &attempt_id,
+                workspace_root: dir.path(),
+                control_root: dir.path(),
+                budget: Duration::from_secs(1),
+                recorder: &mut recorder,
+            })
+            .unwrap();
+        assert!(matches!(exit, WorkerExit::Parked { .. }));
+        let checkpoint: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.path().join("checkpoint.json")).unwrap()).unwrap();
+        assert_eq!(checkpoint["attemptId"], "attempt-park");
+        let schema: serde_json::Value =
+            serde_json::from_str(include_str!("../../../schemas/checkpoint.json")).unwrap();
+        assert_eq!(schema["properties"]["schemaVersion"]["const"], 1);
     }
 
     fn err_channel(err: &AppError) -> ChannelReaction {

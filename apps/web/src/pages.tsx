@@ -20,12 +20,14 @@ import {
   HeartPulse,
   ListFilter,
   PackageOpen,
+  Pause,
   Play,
   Plus,
   Radio,
   RefreshCw,
   RotateCcw,
   ShieldCheck,
+  Square,
   Terminal,
 } from "lucide-react";
 import { type FormEvent, useState } from "react";
@@ -226,7 +228,7 @@ export function OverviewPage() {
   return (
     <>
       <header className="page-header overview-header">
-        <p className="eyebrow">LOCAL CONTROL PLANE · v0.4</p>
+        <p className="eyebrow">LOCAL CONTROL PLANE · v0.5</p>
         <h1>Every outcome has a trail.</h1>
         <p className="lede">
           Durable Work is the record. Follow every execution from immutable
@@ -275,8 +277,8 @@ export function OverviewPage() {
           </div>
           <strong>localhost only</strong>
           <p>
-            Observe, create, and explicit start are available. Execution
-            settings stay on the local host.
+            Observe and control the live lifecycle. Execution settings stay on
+            the local host.
           </p>
         </div>
       </section>
@@ -689,6 +691,12 @@ export function WorkDetailPage() {
   const events = api.useEvents(workId);
   const observation = api.useObservation(workId);
   const startWork = api.useStartWork();
+  const resumeWork = api.useResumeWork();
+  const parkWork = api.useParkWork();
+  const abortWork = api.useAbortWork();
+  const answerWork = api.useAnswerWork();
+  const consentWork = api.useConsentWork();
+  const [operatorInput, setOperatorInput] = useState("");
   const allEvents = events.data?.pages.flatMap((page) => page.items) ?? [];
 
   if (work.isPending)
@@ -720,7 +728,7 @@ export function WorkDetailPage() {
       </header>
       <section className="launch-strip" aria-label="Execution control">
         <div>
-          <p className="panel-kicker">OPERATOR LAUNCH · FOREGROUND</p>
+          <p className="panel-kicker">LIVE OPERATOR · DAEMON OWNED</p>
           <strong>
             {work.data.status === "ready" || work.data.status === "parked"
               ? "Ready for an explicit start"
@@ -732,24 +740,95 @@ export function WorkDetailPage() {
             The persisted profile supplies the runtime. No command, secret, or
             workspace setting comes from this browser.
           </p>
-          {startWork.isError && (
+          {(startWork.isError ||
+            resumeWork.isError ||
+            parkWork.isError ||
+            abortWork.isError ||
+            answerWork.isError ||
+            consentWork.isError) && (
             <p className="form-error" role="alert">
-              {startWork.error.message}
+              {startWork.error?.message ??
+                resumeWork.error?.message ??
+                parkWork.error?.message ??
+                abortWork.error?.message ??
+                answerWork.error?.message ??
+                consentWork.error?.message}
             </p>
           )}
         </div>
-        <button
-          className="launch-action"
-          disabled={
-            startWork.isPending ||
-            (work.data.status !== "ready" && work.data.status !== "parked")
-          }
-          onClick={() => startWork.mutate(workId)}
-          type="button"
-        >
-          <Play size={16} fill="currentColor" />
-          {startWork.isPending ? "Attempt running…" : "Start Work"}
-        </button>
+        <div className="control-actions">
+          {work.data.status === "ready" && (
+            <button
+              className="launch-action"
+              disabled={startWork.isPending}
+              onClick={() => startWork.mutate(workId)}
+              type="button"
+            >
+              <Play size={16} fill="currentColor" />
+              {startWork.isPending ? "Attempt running…" : "Start Work"}
+            </button>
+          )}
+          {work.data.status === "parked" && (
+            <>
+              <input
+                aria-label="Operator input"
+                onChange={(event) => setOperatorInput(event.target.value)}
+                placeholder="Answer or consent action"
+                value={operatorInput}
+              />
+              <button
+                className="launch-action"
+                disabled={resumeWork.isPending}
+                onClick={() => resumeWork.mutate(workId)}
+                type="button"
+              >
+                <RotateCcw size={16} /> Resume
+              </button>
+              <button
+                className="text-button"
+                disabled={!operatorInput || answerWork.isPending}
+                onClick={() =>
+                  answerWork.mutate({ workId, answer: operatorInput })
+                }
+                type="button"
+              >
+                Answer & resume
+              </button>
+              <button
+                className="text-button"
+                disabled={!operatorInput || consentWork.isPending}
+                onClick={() =>
+                  consentWork.mutate({ workId, action: operatorInput })
+                }
+                type="button"
+              >
+                Consent & resume
+              </button>
+            </>
+          )}
+          {work.data.status === "running" && (
+            <>
+              <button
+                className="launch-action"
+                disabled={parkWork.isPending || abortWork.isPending}
+                onClick={() => parkWork.mutate(workId)}
+                type="button"
+              >
+                <Pause size={16} />
+                {parkWork.isPending ? "Checkpointing…" : "Park"}
+              </button>
+              <button
+                className="text-button danger-action"
+                disabled={parkWork.isPending || abortWork.isPending}
+                onClick={() => abortWork.mutate(workId)}
+                type="button"
+              >
+                <Square size={14} fill="currentColor" />
+                {abortWork.isPending ? "Aborting…" : "Abort"}
+              </button>
+            </>
+          )}
+        </div>
       </section>
       <section className="fact-grid" aria-label="Work facts">
         <div>
@@ -887,7 +966,7 @@ export function DoctorPage() {
           <ShieldCheck size={20} />
           <span>LISTENER</span>
           <strong>localhost</strong>
-          <p>No remote bind or authentication in v0.4.</p>
+          <p>No remote bind or authentication in v0.5.</p>
         </div>
       </section>
       {health.isError && (
@@ -902,7 +981,7 @@ export function DoctorPage() {
       >
         <div className="section-heading">
           <div>
-            <p className="panel-kicker">V0.4 CAPABILITIES</p>
+            <p className="panel-kicker">V0.5 CAPABILITIES</p>
             <h2 id="capability-title">What this surface may do</h2>
           </div>
           {health.data && <code>{health.data.version}</code>}
@@ -926,7 +1005,7 @@ export function DoctorPage() {
           </div>
           <div>
             <dt>Park or abort active Work</dt>
-            <dd>not yet</dd>
+            <dd className="yes">yes</dd>
           </div>
           <div>
             <dt>Read workspace or secrets</dt>

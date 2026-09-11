@@ -2,7 +2,7 @@ openapi: 3.1.0
 info:
   title: Workengine Local API
   version: 0.1.0-internal
-  description: Localhost-only operator-intake and observer API. Internal until a public v1 is explicitly adopted.
+  description: Localhost-only daemon lifecycle, operator, and observer API. Internal until a public v1 is explicitly adopted.
 paths:
   /api/v0/health:
     get:
@@ -47,13 +47,64 @@ paths:
   /api/v0/works/{workId}/start:
     post:
       operationId: startWork
-      description: Start ready or parked Work using its locally configured profile. The request carries no execution configuration and returns after the foreground launch reaches a confirmed terminal or parked result.
+      description: Start ready Work using its locally configured profile. The request carries no execution configuration and returns after the daemon-owned launch reaches a confirmed terminal or parked result.
       parameters:
         - { name: workId, in: path, required: true, schema: { type: string } }
       responses:
         '200': { description: Confirmed terminal or parked Work snapshot, content: { application/json: { schema: { $ref: '#/components/schemas/WorkSnapshot' } } } }
         '400': { $ref: '#/components/responses/BadRequest' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/v0/works/{workId}/resume:
+    post:
+      operationId: resumeWork
+      description: Continue parked Work under its immutable execution with a fresh attempt.
+      parameters:
+        - { name: workId, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Server-confirmed Work snapshot, content: { application/json: { schema: { $ref: '#/components/schemas/WorkSnapshot' } } } }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/v0/works/{workId}/park:
+    post:
+      operationId: parkWork
+      description: Request a durable checkpoint and return only after parked is confirmed.
+      parameters:
+        - { name: workId, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Checkpoint-confirmed parked Work, content: { application/json: { schema: { $ref: '#/components/schemas/WorkSnapshot' } } } }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/v0/works/{workId}/abort:
+    post:
+      operationId: abortWork
+      description: Tear down the active process group and confirm a failed result with terminal reason aborted.
+      parameters:
+        - { name: workId, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Server-confirmed failed Work, content: { application/json: { schema: { $ref: '#/components/schemas/WorkSnapshot' } } } }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/v0/works/{workId}/answer:
+    post:
+      operationId: answerWork
+      parameters:
+        - { name: workId, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { $ref: '#/components/schemas/AnswerRequest' } }
+      responses:
+        '200': { description: Same Work continued after recording the answer, content: { application/json: { schema: { $ref: '#/components/schemas/WorkSnapshot' } } } }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/v0/works/{workId}/consent:
+    post:
+      operationId: consentWork
+      parameters:
+        - { name: workId, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { $ref: '#/components/schemas/ConsentRequest' } }
+      responses:
+        '200': { description: Same Work continued after recording explicit consent, content: { application/json: { schema: { $ref: '#/components/schemas/WorkSnapshot' } } } }
         '409': { $ref: '#/components/responses/Conflict' }
   /api/v0/works/{workId}/observation:
     get:
@@ -132,6 +183,18 @@ components:
       properties:
         goal: { type: string, minLength: 1 }
         workerProfile: { type: string, default: stub }
+    AnswerRequest:
+      type: object
+      required: [answer]
+      additionalProperties: false
+      properties:
+        answer: { type: string, minLength: 1 }
+    ConsentRequest:
+      type: object
+      required: [action]
+      additionalProperties: false
+      properties:
+        action: { type: string, minLength: 1 }
     Health:
       type: object
       required: [status, version, store]

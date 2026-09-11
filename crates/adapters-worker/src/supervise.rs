@@ -1,10 +1,13 @@
+use std::fs;
 use std::io::{BufRead, BufReader, Read};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use serde::{Deserialize, Serialize};
 use workengine_application::{AppError, ProcessEvent, RunRequest};
+use workengine_application::{ControlDirective, ControlKind};
 
 use crate::stream::{
     EVENT_CHILD_STDERR, EVENT_CHILD_STDOUT, EVENT_EXITED, EVENT_KILLED, EVENT_SPAWNED, emit,
@@ -13,6 +16,8 @@ use crate::stream::{
 pub(crate) enum ChildWait {
     Exited { success: bool },
     BudgetExceeded,
+    Parked { control_request_id: Option<i64> },
+    Aborted { control_request_id: i64 },
 }
 
 pub(crate) fn spawn_supervised(
@@ -23,6 +28,7 @@ pub(crate) fn spawn_supervised(
     cmd.stderr(Stdio::piped());
     apply_process_group(&mut cmd);
     let mut child = cmd.spawn().map_err(AppError::worker)?;
+    record_runtime_owner(request, child.id())?;
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let (sender, receiver) = mpsc::channel();
@@ -39,7 +45,7 @@ pub(crate) fn spawn_supervised(
     }
     let result = wait_child(&mut child, request, &receiver);
     match &result {
-        Ok(ChildWait::BudgetExceeded) => {
+        Ok(ChildWait::BudgetExceeded | ChildWait::Parked { .. } | ChildWait::Aborted { .. }) => {
             emit(&work_id, EVENT_KILLED, None);
         }
         Ok(ChildWait::Exited { .. }) => {
@@ -59,7 +65,9 @@ pub(crate) fn spawn_supervised(
     let _ = err_h.join();
     drain_records(request, &receiver)?;
     match &result {
-        Ok(ChildWait::BudgetExceeded) => record(request, ProcessEvent::Killed)?,
+        Ok(ChildWait::BudgetExceeded | ChildWait::Parked { .. } | ChildWait::Aborted { .. }) => {
+            record(request, ProcessEvent::Killed)?
+        }
         Ok(ChildWait::Exited { .. }) => record(request, ProcessEvent::Exited)?,
         Err(_) => {}
     }
@@ -73,6 +81,7 @@ fn wait_child(
 ) -> Result<ChildWait, AppError> {
     let deadline = Instant::now() + request.budget;
     let mut next_heartbeat = Instant::now() + Duration::from_secs(1);
+    let mut park_request = None;
     loop {
         if let Err(error) = drain_records(request, receiver) {
             kill_group(child.id());
@@ -86,6 +95,42 @@ fn wait_child(
                 return Err(error);
             }
             next_heartbeat = Instant::now() + Duration::from_secs(1);
+        }
+        if park_request.is_none()
+            && let Some(directive) = request.recorder.control_directive(
+                request.work.id(),
+                request.execution_id,
+                request.attempt_id,
+            )?
+        {
+            match directive.kind {
+                ControlKind::Abort => {
+                    kill_group(child.id());
+                    let _ = child.wait();
+                    return Ok(ChildWait::Aborted {
+                        control_request_id: directive.request_id,
+                    });
+                }
+                ControlKind::Park => {
+                    write_checkpoint_request(request, directive)?;
+                    park_request = Some(directive.request_id);
+                }
+            }
+        }
+        if let Some(control_request_id) = park_request
+            && checkpoint_is_valid(request)?
+        {
+            request.recorder.record_checkpoint(
+                request.work.id(),
+                request.execution_id,
+                request.attempt_id,
+                now_unix_ms()?,
+            )?;
+            kill_group(child.id());
+            let _ = child.wait();
+            return Ok(ChildWait::Parked {
+                control_request_id: Some(control_request_id),
+            });
         }
         match child.try_wait().map_err(AppError::worker)? {
             Some(status) => {
@@ -101,6 +146,81 @@ fn wait_child(
             None => thread::sleep(Duration::from_millis(5)),
         }
     }
+}
+
+const CHECKPOINT_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CheckpointRequest<'a> {
+    schema_version: u32,
+    kind: &'static str,
+    work_id: &'a str,
+    execution_id: &'a str,
+    attempt_id: &'a str,
+    worker_profile: &'a str,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CheckpointCandidate {
+    schema_version: u32,
+    work_id: String,
+    execution_id: String,
+    attempt_id: String,
+    worker_profile: String,
+}
+
+fn write_checkpoint_request(
+    request: &RunRequest<'_>,
+    directive: ControlDirective,
+) -> Result<(), AppError> {
+    let payload = CheckpointRequest {
+        schema_version: CHECKPOINT_SCHEMA_VERSION,
+        kind: directive.kind.as_str(),
+        work_id: request.work.id().as_str(),
+        execution_id: request.execution_id.as_str(),
+        attempt_id: request.attempt_id.as_str(),
+        worker_profile: request.work.attributes().worker_profile(),
+    };
+    let bytes = serde_json::to_vec(&payload).map_err(AppError::worker)?;
+    fs::write(request.control_root.join("checkpoint-request.json"), bytes).map_err(AppError::worker)
+}
+
+fn checkpoint_is_valid(request: &RunRequest<'_>) -> Result<bool, AppError> {
+    let bytes = match fs::read(request.control_root.join("checkpoint.json")) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(AppError::worker(error)),
+    };
+    let candidate: CheckpointCandidate =
+        serde_json::from_slice(&bytes).map_err(AppError::outcome_schema)?;
+    if candidate.schema_version != CHECKPOINT_SCHEMA_VERSION
+        || candidate.work_id != request.work.id().as_str()
+        || candidate.execution_id != request.execution_id.as_str()
+        || candidate.attempt_id != request.attempt_id.as_str()
+        || candidate.worker_profile != request.work.attributes().worker_profile()
+    {
+        return Err(AppError::outcome_schema(
+            "checkpoint candidate does not match the active attempt",
+        ));
+    }
+    Ok(true)
+}
+
+pub(crate) fn write_checkpoint_candidate(request: &RunRequest<'_>) -> Result<(), AppError> {
+    let payload = CheckpointCandidate {
+        schema_version: CHECKPOINT_SCHEMA_VERSION,
+        work_id: request.work.id().to_string(),
+        execution_id: request.execution_id.to_string(),
+        attempt_id: request.attempt_id.to_string(),
+        worker_profile: request.work.attributes().worker_profile().to_owned(),
+    };
+    fs::write(
+        request.control_root.join("checkpoint.json"),
+        serde_json::to_vec(&payload).map_err(AppError::worker)?,
+    )
+    .map_err(AppError::worker)
 }
 
 fn drain_pipe<R: Read + Send + 'static>(
@@ -180,7 +300,7 @@ fn apply_process_group(cmd: &mut Command) {
     }
 }
 
-fn kill_group(pid: u32) {
+pub(crate) fn kill_group(pid: u32) {
     #[cfg(unix)]
     {
         use nix::sys::signal::{self, Signal};
@@ -194,5 +314,111 @@ fn kill_group(pid: u32) {
     {
         // First-slice process-group teardown is Unix. See docs/product/threat-model.md.
         let _ = pid;
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RuntimeOwner {
+    schema_version: u32,
+    work_id: String,
+    execution_id: String,
+    attempt_id: String,
+    pid: u32,
+    process_group: i32,
+    start_ticks: u64,
+}
+
+fn record_runtime_owner(request: &RunRequest<'_>, pid: u32) -> Result<(), AppError> {
+    #[cfg(target_os = "linux")]
+    {
+        let (process_group, start_ticks) = linux_process_identity(pid)?;
+        if process_group != pid as i32 {
+            return Err(AppError::worker(
+                "Worker process group does not match its leader",
+            ));
+        }
+        let owner = RuntimeOwner {
+            schema_version: 1,
+            work_id: request.work.id().to_string(),
+            execution_id: request.execution_id.to_string(),
+            attempt_id: request.attempt_id.to_string(),
+            pid,
+            process_group,
+            start_ticks,
+        };
+        fs::write(
+            request.control_root.join("runtime-owner.json"),
+            serde_json::to_vec(&owner).map_err(AppError::worker)?,
+        )
+        .map_err(AppError::worker)?;
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (request, pid);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn linux_process_identity(pid: u32) -> Result<(i32, u64), AppError> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).map_err(AppError::worker)?;
+    let tail = stat
+        .rsplit_once(") ")
+        .map(|(_, tail)| tail)
+        .ok_or_else(|| AppError::worker("invalid Linux process identity"))?;
+    let fields: Vec<&str> = tail.split_whitespace().collect();
+    let process_group = fields
+        .get(2)
+        .ok_or_else(|| AppError::worker("missing Linux process group"))?
+        .parse()
+        .map_err(AppError::worker)?;
+    let start_ticks = fields
+        .get(19)
+        .ok_or_else(|| AppError::worker("missing Linux process start time"))?
+        .parse()
+        .map_err(AppError::worker)?;
+    Ok((process_group, start_ticks))
+}
+
+pub(crate) fn reclaim_runtime_owner(
+    control_root: &std::path::Path,
+    work_id: &str,
+    execution_id: &str,
+    attempt_id: &str,
+) -> Result<bool, AppError> {
+    #[cfg(target_os = "linux")]
+    {
+        let bytes = match fs::read(control_root.join("runtime-owner.json")) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(AppError::worker(error)),
+        };
+        let owner: RuntimeOwner =
+            serde_json::from_slice(&bytes).map_err(AppError::outcome_schema)?;
+        if owner.schema_version != 1
+            || owner.work_id != work_id
+            || owner.execution_id != execution_id
+            || owner.attempt_id != attempt_id
+            || owner.process_group != owner.pid as i32
+        {
+            return Err(AppError::worker(
+                "runtime ownership proof does not match the active attempt",
+            ));
+        }
+        match linux_process_identity(owner.pid) {
+            Ok((process_group, start_ticks))
+                if process_group == owner.process_group && start_ticks == owner.start_ticks =>
+            {
+                kill_group(owner.pid);
+                Ok(true)
+            }
+            Ok(_) | Err(_) => Ok(false),
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (control_root, work_id, execution_id, attempt_id);
+        Ok(false)
     }
 }

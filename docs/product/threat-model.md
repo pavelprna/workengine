@@ -40,11 +40,13 @@ Short model for a control plane that spawns processes, holds workspace copies, a
 | Prompt injection from a ticket or webpage | Inbound text is data. Free text is never a control command |
 | Secret in config committed or logged | Secrets by reference only. Scrub before publish. No values in issues or logs |
 | Worker escapes the workspace | User profiles select Bubblewrap or OCI; the runner mounts only the declared runtime and workspace, and fails closed without a backend |
-| Timeout kills parent, children remain | Process group terminate then kill (Unix in this slice) |
+| Timeout or abort kills parent, children remain | Process group terminate then kill (Unix in this slice) |
+| Daemon crash leaves an unconfirmed Worker | Protected runtime owner record binds PID, process group, process start identity, Work, execution, and attempt; restart kills only an exact match before reclaiming the lease |
+| Worker forges a park or stale checkpoint | Attempt-private control mount; schema and Work/execution/attempt/profile binding validated before `parked` is committed |
 | Tracker column treated as status | Internal store is SoT; boards are best-effort copies |
 | Workengine phones home | No default telemetry exporter |
 | Destructive host actions | Deny-by-default Worker profile; known-destructive actions forbidden |
-| Two machines double-start the same Work | Per-Work capture/CAS protocol is not yet implemented; this runtime does not claim multi-process `start` safety |
+| Two local clients double-start the same Work | One daemon owns supervisors and the store claims one active attempt transactionally; multi-host capture remains later work |
 
 ## Out of scope for this note
 

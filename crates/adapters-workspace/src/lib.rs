@@ -5,8 +5,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use workengine_application::{AppError, BindRequest, WorkspaceFactory};
-use workengine_domain::{OutcomeKind, WorkId, WorkStatus};
+use workengine_application::{AppError, BindRequest, OperatorInput, WorkspaceFactory};
+use workengine_domain::{AttemptId, ExecutionId, OutcomeKind, WorkId, WorkStatus};
 
 const MEMORY_SCHEMA_VERSION: u32 = 1;
 pub const GOAL_FILE: &str = "workengine-goal.txt";
@@ -23,14 +23,27 @@ struct MemoryLine {
     outcome_kind: String,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OperatorInputLine<'a> {
+    schema_version: u32,
+    input_id: i64,
+    work_id: &'a str,
+    kind: &'a str,
+    body: &'a str,
+    created_at_unix_ms: u64,
+}
+
 pub struct DirWorkspaceFactory {
     root: PathBuf,
+    control_root: PathBuf,
 }
 
 impl DirWorkspaceFactory {
     pub fn new(data_dir: impl AsRef<Path>) -> Self {
         Self {
             root: data_dir.as_ref().join("workspaces"),
+            control_root: data_dir.as_ref().join("control"),
         }
     }
 
@@ -89,6 +102,60 @@ impl WorkspaceFactory for DirWorkspaceFactory {
             .map_err(AppError::workspace)?;
         writeln!(file, "{line}").map_err(AppError::workspace)?;
         Ok(())
+    }
+
+    fn bind_attempt_control(
+        &self,
+        work_id: &WorkId,
+        execution_id: &ExecutionId,
+        attempt_id: &AttemptId,
+    ) -> Result<PathBuf, AppError> {
+        let path = self
+            .control_root
+            .join(work_id.as_str())
+            .join(execution_id.as_str())
+            .join(attempt_id.as_str());
+        if path
+            .symlink_metadata()
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return Err(AppError::workspace(
+                "attempt control path must not be a symlink",
+            ));
+        }
+        fs::create_dir_all(&path).map_err(AppError::workspace)?;
+        restrict_directory(&path)?;
+        Ok(path)
+    }
+
+    fn record_operator_input(
+        &self,
+        work_id: &WorkId,
+        input: &OperatorInput,
+    ) -> Result<(), AppError> {
+        let directory = self.dir(work_id).join(".workengine");
+        fs::create_dir_all(&directory).map_err(AppError::workspace)?;
+        restrict_directory(&directory)?;
+        let path = directory.join("operator-inputs.jsonl");
+        let line = serde_json::to_string(&OperatorInputLine {
+            schema_version: 1,
+            input_id: input.id,
+            work_id: work_id.as_str(),
+            kind: input.kind.as_str(),
+            body: &input.body,
+            created_at_unix_ms: input.created_at_unix_ms,
+        })
+        .map_err(AppError::workspace)?;
+        if last_line(&path)?.as_deref() == Some(line.as_str()) {
+            return Ok(());
+        }
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .map_err(AppError::workspace)?;
+        writeln!(file, "{line}").map_err(AppError::workspace)
     }
 }
 
@@ -164,6 +231,7 @@ fn last_line(path: &Path) -> Result<Option<String>, AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use workengine_application::{OperatorInput, OperatorInputKind};
     use workengine_domain::WorkId;
 
     fn bind(
@@ -287,5 +355,30 @@ mod tests {
         let path = bind(&factory, &a, Some(&src)).unwrap();
         assert!(path.join("real.txt").exists());
         assert!(!path.join("link").exists());
+    }
+
+    #[test]
+    fn operator_inputs_are_append_only_data_for_the_same_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let factory = DirWorkspaceFactory::new(dir.path());
+        let id = WorkId::parse("work-input").unwrap();
+        bind(&factory, &id, None).unwrap();
+        let input = OperatorInput {
+            id: 7,
+            kind: OperatorInputKind::Answer,
+            body: "choose B".to_owned(),
+            created_at_unix_ms: 42,
+        };
+        factory.record_operator_input(&id, &input).unwrap();
+        factory.record_operator_input(&id, &input).unwrap();
+        let text =
+            fs::read_to_string(factory.dir(&id).join(".workengine/operator-inputs.jsonl")).unwrap();
+        assert_eq!(text.lines().count(), 1);
+        let value: serde_json::Value = serde_json::from_str(text.trim()).unwrap();
+        assert_eq!(value["workId"], "work-input");
+        assert_eq!(value["kind"], "answer");
+        let schema: serde_json::Value =
+            serde_json::from_str(include_str!("../../../schemas/operator-input.json")).unwrap();
+        assert_eq!(schema["properties"]["schemaVersion"]["const"], 1);
     }
 }

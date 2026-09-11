@@ -38,6 +38,19 @@ export type WorkFilters = {
   profile?: string;
 };
 
+function refreshWork(
+  queryClient: ReturnType<typeof useQueryClient>,
+  work: WorkSnapshot,
+) {
+  queryClient.setQueryData(["work", work.workId], work);
+  void queryClient.invalidateQueries({ queryKey: ["overview"] });
+  void queryClient.invalidateQueries({ queryKey: ["works"] });
+  void queryClient.invalidateQueries({ queryKey: ["events", work.workId] });
+  void queryClient.invalidateQueries({
+    queryKey: ["observation", work.workId],
+  });
+}
+
 function errorMessage(error: unknown, fallback: string) {
   if (
     error &&
@@ -161,16 +174,91 @@ export const api = {
         return data;
       },
       onSuccess: (work) => {
-        queryClient.setQueryData(["work", work.workId], work);
-        void queryClient.invalidateQueries({ queryKey: ["overview"] });
-        void queryClient.invalidateQueries({ queryKey: ["works"] });
-        void queryClient.invalidateQueries({
-          queryKey: ["events", work.workId],
-        });
-        void queryClient.invalidateQueries({
-          queryKey: ["observation", work.workId],
-        });
+        refreshWork(queryClient, work);
       },
+    });
+  },
+  useResumeWork: () => {
+    const queryClient = useQueryClient();
+    return useMutation({
+      mutationFn: async (workId: string) => {
+        const { data, error } = await client.POST(
+          "/api/v0/works/{workId}/resume",
+          { params: { path: { workId } } },
+        );
+        if (!data)
+          throw new Error(errorMessage(error, "The task could not be resumed"));
+        return data;
+      },
+      onSuccess: (work) => refreshWork(queryClient, work),
+    });
+  },
+  useParkWork: () => {
+    const queryClient = useQueryClient();
+    return useMutation({
+      mutationFn: async (workId: string) => {
+        const { data, error } = await client.POST(
+          "/api/v0/works/{workId}/park",
+          { params: { path: { workId } } },
+        );
+        if (!data)
+          throw new Error(errorMessage(error, "The task could not be parked"));
+        return data;
+      },
+      onSuccess: (work) => refreshWork(queryClient, work),
+    });
+  },
+  useAbortWork: () => {
+    const queryClient = useQueryClient();
+    return useMutation({
+      mutationFn: async (workId: string) => {
+        const { data, error } = await client.POST(
+          "/api/v0/works/{workId}/abort",
+          { params: { path: { workId } } },
+        );
+        if (!data)
+          throw new Error(errorMessage(error, "The task could not be aborted"));
+        return data;
+      },
+      onSuccess: (work) => refreshWork(queryClient, work),
+    });
+  },
+  useAnswerWork: () => {
+    const queryClient = useQueryClient();
+    return useMutation({
+      mutationFn: async (input: { workId: string; answer: string }) => {
+        const { data, error } = await client.POST(
+          "/api/v0/works/{workId}/answer",
+          {
+            params: { path: { workId: input.workId } },
+            body: { answer: input.answer },
+          },
+        );
+        if (!data)
+          throw new Error(
+            errorMessage(error, "The answer could not be recorded"),
+          );
+        return data;
+      },
+      onSuccess: (work) => refreshWork(queryClient, work),
+    });
+  },
+  useConsentWork: () => {
+    const queryClient = useQueryClient();
+    return useMutation({
+      mutationFn: async (input: { workId: string; action: string }) => {
+        const { data, error } = await client.POST(
+          "/api/v0/works/{workId}/consent",
+          {
+            params: { path: { workId: input.workId } },
+            body: { action: input.action },
+          },
+        );
+        if (!data)
+          throw new Error(errorMessage(error, "Consent could not be recorded"));
+        return data;
+      },
+      onSuccess: (work) => refreshWork(queryClient, work),
     });
   },
 };

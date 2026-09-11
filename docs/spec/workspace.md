@@ -29,6 +29,11 @@ This document is the canonical behaviour of Workspace. Keywords follow [RFC 2119
 - **[TESTED]** Workengine MUST write to workspace memory only after a confirmed Work outcome. A still-running or aborted Worker MUST NOT be treated as confirmed.
 - **[TESTED]** Repeating `complete` MUST NOT append a second identical memory line. A retry after a failed memory write MUST still record the missing line.
 
+## Operator input
+
+- **[TESTED]** An answer or explicit consent MUST be stored as data for the same parked Work and MUST NOT create replacement Work.
+- **[TESTED]** Operator input materialized for a Worker MUST carry `schemaVersion`, an input id, Work id, kind, body, and occurrence time. Repeating materialization of the same input MUST NOT append a duplicate line.
+
 ## Related
 
 - Work: [work.md](work.md)

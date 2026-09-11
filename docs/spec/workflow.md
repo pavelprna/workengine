@@ -28,9 +28,10 @@ First-slice transitions. Status names are defined in [work.md](work.md). Workeng
 
 ## Operations
 
-The CLI exposes `create`, `next`, `start`, and `park`; the localhost Web surface
-also exposes narrow `create` and explicit `start` operations. `complete` is an internal
-control-plane operation, not a user command. Their rules:
+The daemon API and its CLI clients expose `create`, `start`, `resume`, `park`,
+`abort`, `answer`, and `consent`; the read-only CLI also exposes `next`.
+`complete` is an internal control-plane operation, not a user command. Their
+rules:
 
 - **[TESTED]** `create` MUST persist a new Work as `ready` with a `Created` event, atomically, and MUST NOT spawn a Worker.
 - **[TESTED]** `next` MUST select Work according to the store and the FSM, not by asking a model which item or phase to take.
@@ -39,16 +40,16 @@ control-plane operation, not a user command. Their rules:
 - **[TESTED]** After the Worker process exits with a closed outcome, `start` MUST apply `complete`. The CLI happy path is one `start` invocation: spawn, wait, record.
 - **[TESTED]** `complete` MUST apply a closed outcome and persist status plus event atomically, following the table above.
 - **[TESTED]** A CLI `complete --file` command MUST NOT exist: a user-provided or workspace-shared outcome has no provenance and cannot recover Work.
-- **[TESTED]** If a workspace contains an outcome artifact, `start` MUST reject it. Attempt-scoped protected recovery artifacts are specified by ADR 0005 and remain pending.
+- **[TESTED]** If a workspace contains an outcome artifact, `start` MUST reject it. Only matching attempt-scoped artifacts in the protected control directory may influence recovery or completion.
 - **[TESTED]** Repeating `next`, internal `complete`, or `park` on the same Work MUST NOT duplicate effects. `start` on already-`running` or terminal Work is an illegal transition.
 - **[TESTED]** `park` MUST pause without losing progress: reach a save point, leave the Worker slot, and leave the Work `parked`.
-- **[UNTESTED]** Live `park` uses a durable checkpoint request consumed by an active supervisor. The present foreground CLI exposes only the historical parked transition while this protocol is being completed.
+- **[TESTED]** Live `park` uses a durable attempt-scoped checkpoint request consumed by the daemon-owned active supervisor. The matching Worker candidate binds its schema version, Work, execution, attempt, and profile; Workengine validates and records it before committing `parked`.
 - **[TESTED]** SQLite runs in WAL mode without a global data-directory lock, so unrelated Work is not blocked. Per-Work capture/CAS is still required before concurrent `start` is claimed safe.
 - **[TESTED]** `park` MUST NOT be abort. Abort, timeout, and hang MUST terminate the process group without treating that path as a save-point pause. `park` MUST reach a save point; abort MUST NOT be required to.
 - **[TESTED]** Parked Work MUST NOT spin, poll, or occupy a Worker slot.
 - **[TESTED]** An answer to a park MUST continue the same Work. It MUST NOT create a new Work.
-- **[UNTESTED]** Every Work lifecycle MUST be interruptible by an operator.
-- **[UNTESTED]** Irreversible actions MUST require explicit consent. An automatic mode, if any, MUST be an explicit choice.
+- **[TESTED]** Every active Work lifecycle MUST be interruptible by an operator through checkpointed park or immediate abort.
+- **[TESTED]** Irreversible actions MUST require explicit consent. Consent is a durable operator-input record for the same Work; an automatic mode, if any, MUST be an explicit choice.
 
 ## Persistence (source of truth)
 
@@ -58,14 +59,14 @@ control-plane operation, not a user command. Their rules:
 - **[TESTED]** Updating Work status and appending the corresponding event MUST be one atomic operation.
 - **[TESTED]** Between Worker runs, status MUST travel through persistent artifacts, not by continuing a model dialogue.
 - **[TESTED]** Every long-lived artifact MUST carry `schemaVersion`.
-- **[TESTED]** On Workengine restart, Work in an unconfirmed state MUST return to the queue automatically (resume from the failure point, not from the beginning of the Work).
-- **[TESTED]** An unconfirmed `running` Work is parked by recovery. There is no `running` → `ready` transition. A workspace directory is not a trusted checkpoint or outcome authority.
+- **[TESTED]** On daemon restart, Work in an unconfirmed state MUST return to the queue automatically from the last confirmed point, not from the beginning of the Work. The daemon first tears down a process group only when its protected runtime record proves the exact PID, process group, process start identity, Work, execution, and attempt.
+- **[TESTED]** An unconfirmed `running` Work is parked by recovery with terminal reason `crash_reclaimed`. There is no `running` → `ready` transition. A workspace directory is not a trusted checkpoint or outcome authority.
 
 ## Execution identity and provenance
 
 - **[TESTED]** Logical executions and Worker process attempts MUST use distinct,
   opaque domain identity types: `ExecutionId` and `AttemptId`.
-- **[UNTESTED]** Every Worker process spawn within one execution MUST receive a
+- **[TESTED]** Every Worker process spawn within one execution MUST receive a
   fresh `AttemptId`; retries and resumes MUST retain the same `ExecutionId`.
 - **[TESTED]** An execution MUST have one immutable `ExecutionSpec` containing
   its Work id, Worker profile, Worker configuration digest, sandbox/runtime

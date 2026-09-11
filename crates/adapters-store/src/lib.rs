@@ -7,7 +7,8 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use workengine_application::{
     AppError, AttemptClaim, AttemptObservation, AttemptRecorder, AttemptState,
-    ConfirmedOutcomeObservation, ExecutionObservation, ExecutionSpecObservation, ProcessEvent,
+    ConfirmedOutcomeObservation, ControlDirective, ControlKind, ExecutionObservation,
+    ExecutionSpecObservation, OperatorInput, OperatorInputKind, ProcessEvent,
     ProcessRecordObservation, SecretRefObservation, SequencedEvent, WorkQuery, WorkStore,
 };
 use workengine_domain::{
@@ -18,7 +19,7 @@ use workengine_domain::{
 
 const WORK_SCHEMA_VERSION: u32 = 1;
 /// SQLite `user_version`. Distinct from per-row `schema_version` on Work.
-const STORE_USER_VERSION: i32 = 4;
+const STORE_USER_VERSION: i32 = 5;
 
 const MIGRATION_1: &str = "
 CREATE TABLE IF NOT EXISTS works (
@@ -96,6 +97,22 @@ CREATE TABLE IF NOT EXISTS attempt_process_records (
     last_observed_at_unix_ms INTEGER NOT NULL,
     payload_redacted INTEGER NOT NULL,
     PRIMARY KEY (attempt_id, event)
+);
+";
+
+const MIGRATION_5: &str = "
+ALTER TABLE attempts ADD COLUMN checkpoint_recorded INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE control_requests ADD COLUMN execution_id TEXT;
+ALTER TABLE control_requests ADD COLUMN attempt_id TEXT;
+ALTER TABLE control_requests ADD COLUMN finished_at_unix_ms INTEGER;
+CREATE UNIQUE INDEX IF NOT EXISTS one_pending_control_per_work
+    ON control_requests(work_id) WHERE state = 'pending';
+CREATE TABLE IF NOT EXISTS operator_inputs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    work_id TEXT NOT NULL REFERENCES works(id),
+    kind TEXT NOT NULL,
+    body TEXT NOT NULL,
+    created_at_unix_ms INTEGER NOT NULL
 );
 ";
 
@@ -408,7 +425,7 @@ fn attempt_observations(
         .prepare(
             "SELECT id, state, created_at_unix_ms,
                     COALESCE(last_heartbeat_at_unix_ms, created_at_unix_ms),
-                    finished_at_unix_ms, terminal_reason
+                    finished_at_unix_ms, terminal_reason, checkpoint_recorded
              FROM attempts WHERE execution_id = ?1
              ORDER BY created_at_unix_ms, id",
         )
@@ -422,13 +439,21 @@ fn attempt_observations(
                 row.get::<_, i64>(3)?,
                 row.get::<_, Option<i64>>(4)?,
                 row.get::<_, Option<String>>(5)?,
+                row.get::<_, bool>(6)?,
             ))
         })
         .map_err(AppError::store)?;
     let mut attempts = Vec::new();
     for (retry_ordinal, row) in rows.enumerate() {
-        let (attempt_id, state, started_at, heartbeat_at, finished_at, terminal_reason) =
-            row.map_err(AppError::store)?;
+        let (
+            attempt_id,
+            state,
+            started_at,
+            heartbeat_at,
+            finished_at,
+            terminal_reason,
+            checkpoint_recorded,
+        ) = row.map_err(AppError::store)?;
         let attempt_id = AttemptId::parse(attempt_id)?;
         attempts.push(AttemptObservation {
             process_records: process_record_observations(conn, &attempt_id)?,
@@ -448,7 +473,7 @@ fn attempt_observations(
                 .map(|value| unsigned(value, "attempt finish time"))
                 .transpose()?,
             terminal_reason,
-            checkpoint_recorded: false,
+            checkpoint_recorded,
         });
     }
     Ok(attempts)
@@ -692,6 +717,66 @@ impl AttemptRecorder for SqliteStore {
         .map_err(AppError::store)?;
         tx.commit().map_err(AppError::store)
     }
+
+    fn control_directive(
+        &mut self,
+        work_id: &WorkId,
+        execution_id: &ExecutionId,
+        attempt_id: &AttemptId,
+    ) -> Result<Option<ControlDirective>, AppError> {
+        self.conn
+            .query_row(
+                "SELECT id, kind FROM control_requests
+                 WHERE work_id = ?1 AND execution_id = ?2 AND attempt_id = ?3
+                   AND state = 'pending'
+                 ORDER BY id LIMIT 1",
+                params![work_id.as_str(), execution_id.as_str(), attempt_id.as_str()],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(AppError::store)?
+            .map(|(request_id, kind)| {
+                Ok(ControlDirective {
+                    request_id,
+                    kind: ControlKind::parse(&kind)?,
+                })
+            })
+            .transpose()
+    }
+
+    fn record_checkpoint(
+        &mut self,
+        work_id: &WorkId,
+        execution_id: &ExecutionId,
+        attempt_id: &AttemptId,
+        observed_at_unix_ms: u64,
+    ) -> Result<(), AppError> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE attempts
+                 SET checkpoint_recorded = 1,
+                     last_heartbeat_at_unix_ms = MAX(
+                       COALESCE(last_heartbeat_at_unix_ms, created_at_unix_ms), ?1
+                     )
+                 WHERE id = ?2 AND execution_id = ?3 AND state = 'active'
+                   AND EXISTS (
+                     SELECT 1 FROM works WHERE id = ?4 AND status = 'running'
+                       AND active_execution_id = ?3 AND active_attempt_id = ?2
+                   )",
+                params![
+                    observed_at_unix_ms as i64,
+                    attempt_id.as_str(),
+                    execution_id.as_str(),
+                    work_id.as_str(),
+                ],
+            )
+            .map_err(AppError::store)?;
+        if changed != 1 {
+            return Err(attempt_conflict(attempt_id));
+        }
+        Ok(())
+    }
 }
 
 impl WorkStore for SqliteStore {
@@ -705,18 +790,34 @@ impl WorkStore for SqliteStore {
     fn claim_attempt(&mut self, claim: &AttemptClaim<'_>) -> Result<(), AppError> {
         let tx = self.conn.transaction().map_err(AppError::store)?;
         let spec_payload = encode_execution_spec(claim.spec)?;
-        tx.execute(
-            "INSERT INTO executions (id, work_id, spec_digest, created_at_unix_ms, spec_payload)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                claim.execution_id.as_str(),
-                claim.work.id().as_str(),
-                claim.spec.worker_config_digest().as_str(),
-                claim.started_at_unix_ms as i64,
-                spec_payload,
-            ],
-        )
-        .map_err(map_constraint_conflict)?;
+        let existing: Option<(String, String)> = tx
+            .query_row(
+                "SELECT work_id, spec_payload FROM executions WHERE id = ?1",
+                [claim.execution_id.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(AppError::store)?;
+        if let Some((work_id, payload)) = existing {
+            if work_id != claim.work.id().as_str() || payload != spec_payload {
+                return Err(AppError::Conflict(
+                    "resume configuration differs from the immutable execution spec".to_owned(),
+                ));
+            }
+        } else {
+            tx.execute(
+                "INSERT INTO executions (id, work_id, spec_digest, created_at_unix_ms, spec_payload)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    claim.execution_id.as_str(),
+                    claim.work.id().as_str(),
+                    claim.spec.worker_config_digest().as_str(),
+                    claim.started_at_unix_ms as i64,
+                    spec_payload,
+                ],
+            )
+            .map_err(map_constraint_conflict)?;
+        }
         tx.execute(
             "INSERT INTO attempts
                  (id, execution_id, state, created_at_unix_ms, last_heartbeat_at_unix_ms)
@@ -816,6 +917,18 @@ impl WorkStore for SqliteStore {
         event: WorkEvent,
         outcome: &ConfirmedOutcome,
     ) -> Result<(), AppError> {
+        let reason = outcome.outcome().kind().as_str();
+        self.confirm_attempt_with_reason(work, event, outcome, reason, None)
+    }
+
+    fn confirm_attempt_with_reason(
+        &mut self,
+        work: &Work,
+        event: WorkEvent,
+        outcome: &ConfirmedOutcome,
+        terminal_reason: &str,
+        control_request_id: Option<i64>,
+    ) -> Result<(), AppError> {
         let tx = self.conn.transaction().map_err(AppError::store)?;
         let changed = tx
             .execute(
@@ -846,7 +959,7 @@ impl WorkStore for SqliteStore {
                      )
                  WHERE id = ?2 AND execution_id = ?3 AND state = 'active'",
                 params![
-                    outcome.outcome().kind().as_str(),
+                    terminal_reason,
                     outcome.attempt_id().as_str(),
                     outcome.execution_id().as_str(),
                     outcome.confirmed_at_unix_ms() as i64,
@@ -869,6 +982,12 @@ impl WorkStore for SqliteStore {
             ],
         )
         .map_err(map_constraint_conflict)?;
+        resolve_controls(
+            &tx,
+            outcome.work_id(),
+            control_request_id,
+            outcome.confirmed_at_unix_ms(),
+        )?;
         insert_event(&tx, &event)?;
         tx.commit().map_err(AppError::store)
     }
@@ -880,6 +999,23 @@ impl WorkStore for SqliteStore {
         execution_id: &ExecutionId,
         attempt_id: &AttemptId,
     ) -> Result<(), AppError> {
+        self.park_attempt_with_checkpoint(work, event, execution_id, attempt_id, true, None)
+    }
+
+    fn park_attempt_with_checkpoint(
+        &mut self,
+        work: &Work,
+        event: WorkEvent,
+        execution_id: &ExecutionId,
+        attempt_id: &AttemptId,
+        checkpoint_recorded: bool,
+        control_request_id: Option<i64>,
+    ) -> Result<(), AppError> {
+        if !checkpoint_recorded {
+            return Err(AppError::Conflict(
+                "park requires a validated attempt checkpoint".to_owned(),
+            ));
+        }
         let tx = self.conn.transaction().map_err(AppError::store)?;
         let changed = tx
             .execute(
@@ -903,6 +1039,7 @@ impl WorkStore for SqliteStore {
             .execute(
                 "UPDATE attempts
                  SET state = 'parked', terminal_reason = 'parked',
+                     checkpoint_recorded = 1,
                      finished_at_unix_ms = ?3,
                      last_heartbeat_at_unix_ms = MAX(
                          COALESCE(last_heartbeat_at_unix_ms, created_at_unix_ms), ?3
@@ -918,9 +1055,163 @@ impl WorkStore for SqliteStore {
         if changed != 1 {
             return Err(attempt_conflict(attempt_id));
         }
+        resolve_controls(
+            &tx,
+            work.id(),
+            control_request_id,
+            event.created_at_unix_ms(),
+        )?;
         insert_event(&tx, &event)?;
         tx.commit().map_err(AppError::store)
     }
+
+    fn request_control(
+        &mut self,
+        work_id: &WorkId,
+        kind: ControlKind,
+        created_at_unix_ms: u64,
+    ) -> Result<ControlDirective, AppError> {
+        let (execution_id, attempt_id): (String, String) = self
+            .conn
+            .query_row(
+                "SELECT active_execution_id, active_attempt_id FROM works
+                 WHERE id = ?1 AND status = 'running'
+                   AND active_execution_id IS NOT NULL AND active_attempt_id IS NOT NULL",
+                [work_id.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(AppError::store)?
+            .ok_or_else(|| AppError::Conflict(format!("Work {work_id} has no active attempt")))?;
+        self.conn
+            .execute(
+                "INSERT INTO control_requests
+                   (work_id, kind, state, created_at_unix_ms, execution_id, attempt_id)
+                 VALUES (?1, ?2, 'pending', ?3, ?4, ?5)",
+                params![
+                    work_id.as_str(),
+                    kind.as_str(),
+                    created_at_unix_ms as i64,
+                    execution_id,
+                    attempt_id,
+                ],
+            )
+            .map_err(map_constraint_conflict)?;
+        Ok(ControlDirective {
+            request_id: self.conn.last_insert_rowid(),
+            kind,
+        })
+    }
+
+    fn reclaim_attempt(
+        &mut self,
+        work: &Work,
+        event: WorkEvent,
+        execution_id: &ExecutionId,
+        attempt_id: &AttemptId,
+    ) -> Result<(), AppError> {
+        let tx = self.conn.transaction().map_err(AppError::store)?;
+        let changed = tx
+            .execute(
+                "UPDATE works
+                 SET status = 'parked', generation = generation + 1,
+                     active_execution_id = NULL, active_attempt_id = NULL
+                 WHERE id = ?1 AND status = 'running'
+                   AND active_execution_id = ?2 AND active_attempt_id = ?3",
+                params![
+                    work.id().as_str(),
+                    execution_id.as_str(),
+                    attempt_id.as_str()
+                ],
+            )
+            .map_err(AppError::store)?;
+        if changed != 1 {
+            return Err(attempt_conflict(attempt_id));
+        }
+        tx.execute(
+            "UPDATE attempts
+             SET state = 'parked', terminal_reason = 'crash_reclaimed',
+                 finished_at_unix_ms = ?3
+             WHERE id = ?1 AND execution_id = ?2 AND state = 'active'",
+            params![
+                attempt_id.as_str(),
+                execution_id.as_str(),
+                event.created_at_unix_ms() as i64,
+            ],
+        )
+        .map_err(AppError::store)?;
+        tx.execute(
+            "UPDATE control_requests SET state = 'cancelled', finished_at_unix_ms = ?2
+             WHERE work_id = ?1 AND state = 'pending'",
+            params![work.id().as_str(), event.created_at_unix_ms() as i64],
+        )
+        .map_err(AppError::store)?;
+        insert_event(&tx, &event)?;
+        tx.commit().map_err(AppError::store)
+    }
+
+    fn append_operator_input(
+        &mut self,
+        work_id: &WorkId,
+        kind: OperatorInputKind,
+        body: &str,
+        created_at_unix_ms: u64,
+    ) -> Result<OperatorInput, AppError> {
+        self.conn
+            .execute(
+                "INSERT INTO operator_inputs (work_id, kind, body, created_at_unix_ms)
+                 SELECT id, ?2, ?3, ?4 FROM works WHERE id = ?1 AND status = 'parked'",
+                params![
+                    work_id.as_str(),
+                    kind.as_str(),
+                    body,
+                    created_at_unix_ms as i64,
+                ],
+            )
+            .map_err(AppError::store)
+            .and_then(|changed| {
+                if changed == 1 {
+                    Ok(())
+                } else {
+                    Err(AppError::Conflict(format!("Work {work_id} is not parked")))
+                }
+            })?;
+        Ok(OperatorInput {
+            id: self.conn.last_insert_rowid(),
+            kind,
+            body: body.to_owned(),
+            created_at_unix_ms,
+        })
+    }
+}
+
+fn resolve_controls(
+    tx: &Transaction<'_>,
+    work_id: &WorkId,
+    handled_id: Option<i64>,
+    finished_at_unix_ms: u64,
+) -> Result<(), AppError> {
+    if let Some(id) = handled_id {
+        let changed = tx
+            .execute(
+                "UPDATE control_requests SET state = 'handled', finished_at_unix_ms = ?1
+                 WHERE id = ?2 AND work_id = ?3 AND state = 'pending'",
+                params![finished_at_unix_ms as i64, id, work_id.as_str()],
+            )
+            .map_err(AppError::store)?;
+        if changed != 1 {
+            return Err(AppError::Conflict(format!(
+                "control request {id} is not pending for Work {work_id}"
+            )));
+        }
+    }
+    tx.execute(
+        "UPDATE control_requests SET state = 'cancelled', finished_at_unix_ms = ?2
+         WHERE work_id = ?1 AND state = 'pending'",
+        params![work_id.as_str(), finished_at_unix_ms as i64],
+    )
+    .map_err(AppError::store)?;
+    Ok(())
 }
 
 fn migrate(conn: &Connection) -> Result<(), AppError> {
@@ -937,15 +1228,22 @@ fn migrate(conn: &Connection) -> Result<(), AppError> {
         conn.execute_batch(MIGRATION_2).map_err(AppError::store)?;
         conn.execute_batch(MIGRATION_3).map_err(AppError::store)?;
         conn.execute_batch(MIGRATION_4).map_err(AppError::store)?;
+        conn.execute_batch(MIGRATION_5).map_err(AppError::store)?;
         conn.pragma_update(None, "user_version", STORE_USER_VERSION)
             .map_err(AppError::store)?;
     } else if current == 2 {
         conn.execute_batch(MIGRATION_3).map_err(AppError::store)?;
         conn.execute_batch(MIGRATION_4).map_err(AppError::store)?;
+        conn.execute_batch(MIGRATION_5).map_err(AppError::store)?;
         conn.pragma_update(None, "user_version", STORE_USER_VERSION)
             .map_err(AppError::store)?;
     } else if current == 3 {
         conn.execute_batch(MIGRATION_4).map_err(AppError::store)?;
+        conn.execute_batch(MIGRATION_5).map_err(AppError::store)?;
+        conn.pragma_update(None, "user_version", STORE_USER_VERSION)
+            .map_err(AppError::store)?;
+    } else if current == 4 {
+        conn.execute_batch(MIGRATION_5).map_err(AppError::store)?;
         conn.pragma_update(None, "user_version", STORE_USER_VERSION)
             .map_err(AppError::store)?;
     }
@@ -1321,7 +1619,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("workengine.sqlite");
         let conn = Connection::open(&path).unwrap();
-        conn.pragma_update(None, "user_version", 5).unwrap();
+        conn.pragma_update(None, "user_version", STORE_USER_VERSION + 1)
+            .unwrap();
         drop(conn);
         let err = match SqliteStore::open(dir.path()) {
             Ok(_) => panic!("expected unknown store version to fail"),
@@ -1329,7 +1628,7 @@ mod tests {
         };
         assert!(matches!(
             err,
-            AppError::Domain(workengine_domain::DomainError::UnsupportedSchemaVersion(5))
+            AppError::Domain(workengine_domain::DomainError::UnsupportedSchemaVersion(6))
         ));
     }
 
@@ -1527,6 +1826,70 @@ mod tests {
             16,
         );
         assert!(matches!(stale, Err(AppError::Conflict(_))));
+    }
+
+    #[test]
+    fn live_control_is_lease_scoped_and_park_requires_checkpoint() {
+        let (mut store, _dir) = store();
+        let work = sample();
+        store.put(&work, WorkEvent::created(&work)).unwrap();
+        let spec = execution_spec(&work);
+        let execution_id = ExecutionId::parse("execution-control").unwrap();
+        let attempt_id = AttemptId::parse("attempt-control").unwrap();
+        let mut running = work.clone();
+        running.start().unwrap();
+        store
+            .claim_attempt(&AttemptClaim {
+                execution_id: &execution_id,
+                attempt_id: &attempt_id,
+                spec: &spec,
+                work: &running,
+                event: WorkEvent::started(&running, WorkStatus::Ready, 8),
+                started_at_unix_ms: 8,
+            })
+            .unwrap();
+        let directive = store
+            .request_control(work.id(), ControlKind::Park, 9)
+            .unwrap();
+        assert_eq!(
+            store
+                .control_directive(work.id(), &execution_id, &attempt_id)
+                .unwrap(),
+            Some(directive)
+        );
+        let mut parked = running.clone();
+        parked.park().unwrap();
+        let rejected = store.park_attempt_with_checkpoint(
+            &parked,
+            WorkEvent::parked(&parked, WorkStatus::Running, 10),
+            &execution_id,
+            &attempt_id,
+            false,
+            Some(directive.request_id),
+        );
+        assert!(matches!(rejected, Err(AppError::Conflict(_))));
+        store
+            .record_checkpoint(work.id(), &execution_id, &attempt_id, 10)
+            .unwrap();
+        store
+            .park_attempt_with_checkpoint(
+                &parked,
+                WorkEvent::parked(&parked, WorkStatus::Running, 10),
+                &execution_id,
+                &attempt_id,
+                true,
+                Some(directive.request_id),
+            )
+            .unwrap();
+        let observed = store.executions(work.id()).unwrap();
+        assert_eq!(observed[0].attempts[0].state, AttemptState::Parked);
+        assert!(observed[0].attempts[0].checkpoint_recorded);
+        assert!(
+            store
+                .control_directive(work.id(), &execution_id, &attempt_id)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

@@ -8,7 +8,8 @@ use workengine_domain::{
 use crate::clock::Clock;
 use crate::error::{AppError, ChannelReaction};
 use crate::ports::{
-    AttemptClaim, BindRequest, RunRequest, StartRequest, WorkStore, WorkerRunner, WorkspaceFactory,
+    AttemptClaim, AttemptState, BindRequest, RunRequest, StartRequest, WorkStore, WorkerExit,
+    WorkerRunner, WorkspaceFactory,
 };
 
 /// Claim an attempt, bind a workspace, spawn a Worker, and confirm its outcome.
@@ -45,8 +46,34 @@ pub fn start(
     let from = work.status();
     work.start()?;
 
-    let execution_id = generated_execution_id()?;
+    let (execution_id, spent_before_ms) = if from == workengine_domain::WorkStatus::Parked {
+        store
+            .executions(id)?
+            .into_iter()
+            .rev()
+            .find(|execution| {
+                execution
+                    .attempts
+                    .last()
+                    .is_some_and(|attempt| attempt.state == AttemptState::Parked)
+            })
+            .map(|execution| {
+                let spent = execution.attempts.iter().fold(0_u64, |total, attempt| {
+                    total.saturating_add(
+                        attempt
+                            .finished_at_unix_ms
+                            .unwrap_or(attempt.last_heartbeat_at_unix_ms)
+                            .saturating_sub(attempt.started_at_unix_ms),
+                    )
+                });
+                (execution.execution_id, spent)
+            })
+            .unwrap_or((generated_execution_id()?, 0))
+    } else {
+        (generated_execution_id()?, 0)
+    };
     let mut attempt_id = generated_attempt_id()?;
+    let mut control_root = workspaces.bind_attempt_control(id, &execution_id, &attempt_id)?;
     let started_at = clock.unix_ms();
     store.claim_attempt(&AttemptClaim {
         execution_id: &execution_id,
@@ -61,7 +88,9 @@ pub fn start(
     let started = Instant::now();
     let mut remaining_retries = request.execution_spec.retry_limit();
     loop {
-        let remaining_budget = budget.saturating_sub(started.elapsed());
+        let spent_before = Duration::from_millis(spent_before_ms);
+        let remaining_budget =
+            budget.saturating_sub(spent_before.saturating_add(started.elapsed()));
         if remaining_budget.is_zero() {
             let outcome = Outcome::new(
                 OUTCOME_SCHEMA_VERSION,
@@ -77,6 +106,8 @@ pub fn start(
                 &execution_id,
                 &attempt_id,
                 outcome,
+                None,
+                None,
             );
         }
         let result = runner.run(&mut RunRequest {
@@ -84,11 +115,12 @@ pub fn start(
             execution_id: &execution_id,
             attempt_id: &attempt_id,
             workspace_root: &root,
+            control_root: &control_root,
             budget: remaining_budget,
             recorder: store,
         });
         match result {
-            Ok(outcome) => {
+            Ok(WorkerExit::Completed(outcome)) => {
                 return confirm(
                     store,
                     workspaces,
@@ -98,14 +130,39 @@ pub fn start(
                     &execution_id,
                     &attempt_id,
                     outcome,
+                    None,
+                    None,
                 );
             }
-            Err(err @ AppError::OutcomeSchema(_)) => {
-                park_claim(store, clock, &mut work, &execution_id, &attempt_id)?;
-                return Err(err);
+            Ok(WorkerExit::Parked { control_request_id }) => {
+                return park_claim(
+                    store,
+                    clock,
+                    &mut work,
+                    &execution_id,
+                    &attempt_id,
+                    true,
+                    control_request_id,
+                );
             }
-            Err(AppError::Channel(ChannelReaction::Park)) => {
-                return park_claim(store, clock, &mut work, &execution_id, &attempt_id);
+            Ok(WorkerExit::Aborted { control_request_id }) => {
+                let outcome = Outcome::new(
+                    OUTCOME_SCHEMA_VERSION,
+                    OutcomeKind::Failed,
+                    work.attributes().worker_profile(),
+                )?;
+                return confirm(
+                    store,
+                    workspaces,
+                    clock,
+                    &mut work,
+                    request,
+                    &execution_id,
+                    &attempt_id,
+                    outcome,
+                    Some("aborted"),
+                    Some(control_request_id),
+                );
             }
             Err(AppError::Channel(ChannelReaction::Retry)) if remaining_retries > 0 => {
                 remaining_retries -= 1;
@@ -117,8 +174,12 @@ pub fn start(
                     clock.unix_ms(),
                 )?;
                 attempt_id = next_attempt_id;
+                control_root = workspaces.bind_attempt_control(id, &execution_id, &attempt_id)?;
             }
-            Err(AppError::Channel(ChannelReaction::Retry | ChannelReaction::Fail)) | Err(_) => {
+            Err(AppError::Channel(
+                ChannelReaction::Retry | ChannelReaction::Fail | ChannelReaction::Park,
+            ))
+            | Err(_) => {
                 let outcome = Outcome::new(
                     OUTCOME_SCHEMA_VERSION,
                     OutcomeKind::ChannelError,
@@ -133,6 +194,8 @@ pub fn start(
                     &execution_id,
                     &attempt_id,
                     outcome,
+                    None,
+                    None,
                 );
             }
         }
@@ -149,6 +212,8 @@ fn confirm(
     execution_id: &ExecutionId,
     attempt_id: &AttemptId,
     outcome: Outcome,
+    terminal_reason: Option<&str>,
+    control_request_id: Option<i64>,
 ) -> Result<Work, AppError> {
     let confirmed_at = clock.unix_ms();
     let confirmed = ConfirmedOutcome::new(
@@ -161,10 +226,12 @@ fn confirm(
     )?;
     let from = work.status();
     work.complete(confirmed.outcome())?;
-    store.confirm_attempt(
+    store.confirm_attempt_with_reason(
         work,
         WorkEvent::completed(work, from, confirmed.outcome().kind(), confirmed_at),
         &confirmed,
+        terminal_reason.unwrap_or_else(|| confirmed.outcome().kind().as_str()),
+        control_request_id,
     )?;
     workspaces.record_memory(work.id(), work.status(), confirmed.outcome().kind())?;
     Ok(work.clone())
@@ -176,14 +243,18 @@ fn park_claim(
     work: &mut Work,
     execution_id: &ExecutionId,
     attempt_id: &AttemptId,
+    checkpoint_recorded: bool,
+    control_request_id: Option<i64>,
 ) -> Result<Work, AppError> {
     let from = work.status();
     work.park()?;
-    store.park_attempt(
+    store.park_attempt_with_checkpoint(
         work,
         WorkEvent::parked(work, from, clock.unix_ms()),
         execution_id,
         attempt_id,
+        checkpoint_recorded,
+        control_request_id,
     )?;
     Ok(work.clone())
 }
