@@ -14,8 +14,11 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use workengine_adapters_store::{SqliteObserver, SqliteStore};
-use workengine_application::{AppError, SequencedEvent, SystemClock, WorkQuery, create};
-use workengine_domain::{Work, WorkEvent, WorkId, WorkStatus};
+use workengine_application::{
+    AppError, AttemptObservation, AttemptState, ExecutionObservation, ProcessRecordObservation,
+    SequencedEvent, SystemClock, WorkQuery, create,
+};
+use workengine_domain::{AttemptId, ExecutionId, Work, WorkEvent, WorkId, WorkStatus};
 
 include!(concat!(env!("OUT_DIR"), "/web_assets.rs"));
 
@@ -76,6 +79,22 @@ fn router(state: ObserverState) -> Router {
         .route("/api/v0/works", get(list_works).post(create_work))
         .route("/api/v0/works/{work_id}", get(show_work))
         .route("/api/v0/works/{work_id}/start", post(start_work))
+        .route(
+            "/api/v0/works/{work_id}/observation",
+            get(show_observation),
+        )
+        .route(
+            "/api/v0/works/{work_id}/executions/{execution_id}/spec",
+            get(show_execution_spec),
+        )
+        .route(
+            "/api/v0/works/{work_id}/executions/{execution_id}/attempts/{attempt_id}/process-records",
+            get(show_process_records),
+        )
+        .route(
+            "/api/v0/works/{work_id}/executions/{execution_id}/attempts/{attempt_id}/outcome",
+            get(show_confirmed_outcome),
+        )
         .route("/api/v0/events", get(list_events))
         .route("/api/v0/events/stream", get(stream_events))
         .fallback(get(static_asset))
@@ -135,6 +154,110 @@ struct EventResponse {
     to: &'static str,
     outcome_kind: Option<&'static str>,
     created_at_unix_ms: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ObservationResponse {
+    executions: Vec<ExecutionResponse>,
+    artifacts: Vec<ArtifactResponse>,
+    diagnostics: Vec<DiagnosticResponse>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExecutionResponse {
+    execution_id: String,
+    created_at_unix_ms: String,
+    spec: ExecutionSpecResponse,
+    attempts: Vec<AttemptResponse>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExecutionSpecResponse {
+    schema_version: u32,
+    worker_profile: String,
+    worker_config_digest: String,
+    runtime_kind: String,
+    runtime_digest: String,
+    wall_clock_budget_ms: String,
+    retry_limit: u32,
+    channel_policy: String,
+    secret_refs: Vec<SecretRefResponse>,
+}
+
+#[derive(Serialize)]
+struct SecretRefResponse {
+    name: String,
+    source: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AttemptResponse {
+    attempt_id: String,
+    state: &'static str,
+    retry_ordinal: u32,
+    started_at_unix_ms: String,
+    last_heartbeat_at_unix_ms: String,
+    finished_at_unix_ms: Option<String>,
+    terminal_reason: Option<String>,
+    checkpoint: &'static str,
+    process_records: Vec<ProcessRecordResponse>,
+    confirmed_outcome: Option<ConfirmedOutcomeResponse>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProcessRecordResponse {
+    event: &'static str,
+    occurrences: String,
+    first_observed_at_unix_ms: String,
+    last_observed_at_unix_ms: String,
+    payload_redacted: bool,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConfirmedOutcomeResponse {
+    schema_version: u32,
+    kind: &'static str,
+    worker_profile: String,
+    confirmed_at_unix_ms: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ArtifactResponse {
+    kind: &'static str,
+    label: String,
+    href: String,
+    execution_id: String,
+    attempt_id: Option<String>,
+    authored_by: String,
+    created_at_unix_ms: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DiagnosticResponse {
+    severity: &'static str,
+    code: &'static str,
+    message: String,
+    execution_id: Option<String>,
+    attempt_id: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProofResponse<T> {
+    schema_version: u32,
+    kind: &'static str,
+    work_id: String,
+    execution_id: String,
+    attempt_id: Option<String>,
+    data: T,
 }
 
 #[derive(Serialize)]
@@ -275,6 +398,82 @@ async fn start_work(
         .map_err(|error| ApiError::internal(format!("start task failed: {error}")))?
         .map_err(ApiError::from_start)?;
     Ok(Json(work_response(&state, &work)?))
+}
+
+async fn show_observation(
+    State(state): State<ObserverState>,
+    Path(work_id): Path<String>,
+) -> Result<Json<ObservationResponse>, ApiError> {
+    let id = WorkId::parse(work_id).map_err(ApiError::bad_request)?;
+    let exists = with_query(&state, |query| query.get(&id))?.is_some();
+    if !exists {
+        return Err(ApiError::not_found("Work was not found"));
+    }
+    let executions = with_query(&state, |query| query.executions(&id))?;
+    Ok(Json(observation_response(&id, executions)))
+}
+
+async fn show_execution_spec(
+    State(state): State<ObserverState>,
+    Path((work_id, execution_id)): Path<(String, String)>,
+) -> Result<Json<ProofResponse<ExecutionSpecResponse>>, ApiError> {
+    let work_id = WorkId::parse(work_id).map_err(ApiError::bad_request)?;
+    let execution_id = ExecutionId::parse(execution_id).map_err(ApiError::bad_request)?;
+    let execution = find_execution(&state, &work_id, &execution_id)?;
+    Ok(Json(ProofResponse {
+        schema_version: 1,
+        kind: "execution_spec",
+        work_id: work_id.to_string(),
+        execution_id: execution_id.to_string(),
+        attempt_id: None,
+        data: execution_spec_response(&execution),
+    }))
+}
+
+async fn show_process_records(
+    State(state): State<ObserverState>,
+    Path((work_id, execution_id, attempt_id)): Path<(String, String, String)>,
+) -> Result<Json<ProofResponse<Vec<ProcessRecordResponse>>>, ApiError> {
+    let work_id = WorkId::parse(work_id).map_err(ApiError::bad_request)?;
+    let execution_id = ExecutionId::parse(execution_id).map_err(ApiError::bad_request)?;
+    let attempt_id = AttemptId::parse(attempt_id).map_err(ApiError::bad_request)?;
+    let execution = find_execution(&state, &work_id, &execution_id)?;
+    let attempt = find_attempt(&execution, &attempt_id)?;
+    Ok(Json(ProofResponse {
+        schema_version: 1,
+        kind: "process_records",
+        work_id: work_id.to_string(),
+        execution_id: execution_id.to_string(),
+        attempt_id: Some(attempt_id.to_string()),
+        data: attempt
+            .process_records
+            .iter()
+            .map(process_record_response)
+            .collect(),
+    }))
+}
+
+async fn show_confirmed_outcome(
+    State(state): State<ObserverState>,
+    Path((work_id, execution_id, attempt_id)): Path<(String, String, String)>,
+) -> Result<Json<ProofResponse<ConfirmedOutcomeResponse>>, ApiError> {
+    let work_id = WorkId::parse(work_id).map_err(ApiError::bad_request)?;
+    let execution_id = ExecutionId::parse(execution_id).map_err(ApiError::bad_request)?;
+    let attempt_id = AttemptId::parse(attempt_id).map_err(ApiError::bad_request)?;
+    let execution = find_execution(&state, &work_id, &execution_id)?;
+    let attempt = find_attempt(&execution, &attempt_id)?;
+    let outcome = attempt
+        .confirmed_outcome
+        .as_ref()
+        .ok_or_else(|| ApiError::not_found("Confirmed outcome was not found"))?;
+    Ok(Json(ProofResponse {
+        schema_version: 1,
+        kind: "confirmed_outcome",
+        work_id: work_id.to_string(),
+        execution_id: execution_id.to_string(),
+        attempt_id: Some(attempt_id.to_string()),
+        data: confirmed_outcome_response(outcome),
+    }))
 }
 
 async fn list_events(
@@ -445,6 +644,241 @@ fn event_response(record: &SequencedEvent) -> EventResponse {
     }
 }
 
+fn find_execution(
+    state: &ObserverState,
+    work_id: &WorkId,
+    execution_id: &ExecutionId,
+) -> Result<ExecutionObservation, ApiError> {
+    with_query(state, |query| query.executions(work_id))?
+        .into_iter()
+        .find(|execution| &execution.execution_id == execution_id)
+        .ok_or_else(|| ApiError::not_found("Execution was not found"))
+}
+
+fn find_attempt<'a>(
+    execution: &'a ExecutionObservation,
+    attempt_id: &AttemptId,
+) -> Result<&'a AttemptObservation, ApiError> {
+    execution
+        .attempts
+        .iter()
+        .find(|attempt| &attempt.attempt_id == attempt_id)
+        .ok_or_else(|| ApiError::not_found("Attempt was not found"))
+}
+
+fn observation_response(
+    work_id: &WorkId,
+    executions: Vec<ExecutionObservation>,
+) -> ObservationResponse {
+    let mut artifacts = Vec::new();
+    let mut diagnostics = Vec::new();
+    if executions.is_empty() {
+        diagnostics.push(DiagnosticResponse {
+            severity: "info",
+            code: "not_started",
+            message: "No execution has been claimed for this Work.".to_owned(),
+            execution_id: None,
+            attempt_id: None,
+        });
+    }
+    for execution in &executions {
+        let execution_base = format!(
+            "/api/v0/works/{}/executions/{}",
+            work_id, execution.execution_id
+        );
+        artifacts.push(ArtifactResponse {
+            kind: "execution_spec",
+            label: "Immutable execution spec".to_owned(),
+            href: format!("{execution_base}/spec"),
+            execution_id: execution.execution_id.to_string(),
+            attempt_id: None,
+            authored_by: "workengine".to_owned(),
+            created_at_unix_ms: execution.created_at_unix_ms.to_string(),
+        });
+        if execution.spec.runtime_kind.is_none() {
+            diagnostics.push(DiagnosticResponse {
+                severity: "warning",
+                code: "runtime_kind_unknown",
+                message: "This older execution snapshot has a runtime digest but no runtime kind."
+                    .to_owned(),
+                execution_id: Some(execution.execution_id.to_string()),
+                attempt_id: None,
+            });
+        }
+        for attempt in &execution.attempts {
+            let attempt_base = format!("{execution_base}/attempts/{}", attempt.attempt_id);
+            artifacts.push(ArtifactResponse {
+                kind: "process_records",
+                label: format!("Attempt {} process records", attempt.retry_ordinal + 1),
+                href: format!("{attempt_base}/process-records"),
+                execution_id: execution.execution_id.to_string(),
+                attempt_id: Some(attempt.attempt_id.to_string()),
+                authored_by: "workengine supervisor".to_owned(),
+                created_at_unix_ms: attempt.started_at_unix_ms.to_string(),
+            });
+            if let Some(outcome) = &attempt.confirmed_outcome {
+                artifacts.push(ArtifactResponse {
+                    kind: "confirmed_outcome",
+                    label: format!("Confirmed {} outcome", outcome.kind.as_str()),
+                    href: format!("{attempt_base}/outcome"),
+                    execution_id: execution.execution_id.to_string(),
+                    attempt_id: Some(attempt.attempt_id.to_string()),
+                    authored_by: outcome.worker_profile.clone(),
+                    created_at_unix_ms: outcome.confirmed_at_unix_ms.to_string(),
+                });
+            }
+            diagnostics.extend(attempt_diagnostics(execution, attempt));
+        }
+    }
+    ObservationResponse {
+        executions: executions.iter().map(execution_response).collect(),
+        artifacts,
+        diagnostics,
+    }
+}
+
+fn execution_response(execution: &ExecutionObservation) -> ExecutionResponse {
+    ExecutionResponse {
+        execution_id: execution.execution_id.to_string(),
+        created_at_unix_ms: execution.created_at_unix_ms.to_string(),
+        spec: execution_spec_response(execution),
+        attempts: execution.attempts.iter().map(attempt_response).collect(),
+    }
+}
+
+fn execution_spec_response(execution: &ExecutionObservation) -> ExecutionSpecResponse {
+    ExecutionSpecResponse {
+        schema_version: execution.spec.schema_version,
+        worker_profile: execution.spec.worker_profile.clone(),
+        worker_config_digest: execution.spec.worker_config_digest.clone(),
+        runtime_kind: execution
+            .spec
+            .runtime_kind
+            .clone()
+            .unwrap_or_else(|| "unknown".to_owned()),
+        runtime_digest: execution.spec.runtime_digest.clone(),
+        wall_clock_budget_ms: execution.spec.wall_clock_budget_ms.to_string(),
+        retry_limit: execution.spec.retry_limit,
+        channel_policy: execution.spec.channel_policy.clone(),
+        secret_refs: execution
+            .spec
+            .secret_refs
+            .iter()
+            .map(|reference| SecretRefResponse {
+                name: reference.name.clone(),
+                source: reference.source.clone(),
+            })
+            .collect(),
+    }
+}
+
+fn attempt_response(attempt: &AttemptObservation) -> AttemptResponse {
+    AttemptResponse {
+        attempt_id: attempt.attempt_id.to_string(),
+        state: attempt.state.as_str(),
+        retry_ordinal: attempt.retry_ordinal,
+        started_at_unix_ms: attempt.started_at_unix_ms.to_string(),
+        last_heartbeat_at_unix_ms: attempt.last_heartbeat_at_unix_ms.to_string(),
+        finished_at_unix_ms: attempt.finished_at_unix_ms.map(|value| value.to_string()),
+        terminal_reason: attempt.terminal_reason.clone(),
+        checkpoint: if attempt.checkpoint_recorded {
+            "recorded"
+        } else {
+            "not_recorded"
+        },
+        process_records: attempt
+            .process_records
+            .iter()
+            .map(process_record_response)
+            .collect(),
+        confirmed_outcome: attempt
+            .confirmed_outcome
+            .as_ref()
+            .map(confirmed_outcome_response),
+    }
+}
+
+fn process_record_response(record: &ProcessRecordObservation) -> ProcessRecordResponse {
+    ProcessRecordResponse {
+        event: record.event.as_str(),
+        occurrences: record.occurrences.to_string(),
+        first_observed_at_unix_ms: record.first_observed_at_unix_ms.to_string(),
+        last_observed_at_unix_ms: record.last_observed_at_unix_ms.to_string(),
+        payload_redacted: record.payload_redacted,
+    }
+}
+
+fn confirmed_outcome_response(
+    outcome: &workengine_application::ConfirmedOutcomeObservation,
+) -> ConfirmedOutcomeResponse {
+    ConfirmedOutcomeResponse {
+        schema_version: outcome.schema_version,
+        kind: outcome.kind.as_str(),
+        worker_profile: outcome.worker_profile.clone(),
+        confirmed_at_unix_ms: outcome.confirmed_at_unix_ms.to_string(),
+    }
+}
+
+fn attempt_diagnostics(
+    execution: &ExecutionObservation,
+    attempt: &AttemptObservation,
+) -> Vec<DiagnosticResponse> {
+    let (severity, code, message) = match attempt.state {
+        AttemptState::Active => (
+            "info",
+            "active_attempt",
+            "The active lease is owned and the supervisor heartbeat is recorded.".to_owned(),
+        ),
+        AttemptState::Retried => (
+            "warning",
+            "channel_retry",
+            "The attempt ended with a classified channel retry.".to_owned(),
+        ),
+        AttemptState::Parked => (
+            "warning",
+            "attempt_parked",
+            if attempt.checkpoint_recorded {
+                "The attempt parked with checkpoint proof.".to_owned()
+            } else {
+                "The attempt parked without a recorded checkpoint proof.".to_owned()
+            },
+        ),
+        AttemptState::Confirmed => {
+            let reason = attempt.terminal_reason.as_deref().unwrap_or("unknown");
+            if reason == "succeeded" {
+                (
+                    "info",
+                    "confirmed_success",
+                    "The matching attempt produced a confirmed successful outcome.".to_owned(),
+                )
+            } else {
+                (
+                    "error",
+                    "terminal_failure",
+                    format!("The matching attempt ended with terminal reason {reason}."),
+                )
+            }
+        }
+    };
+    let mut diagnostics = vec![DiagnosticResponse {
+        severity,
+        code,
+        message,
+        execution_id: Some(execution.execution_id.to_string()),
+        attempt_id: Some(attempt.attempt_id.to_string()),
+    }];
+    if attempt.process_records.is_empty() {
+        diagnostics.push(DiagnosticResponse {
+            severity: "warning",
+            code: "process_record_missing",
+            message: "No durable process metadata was recorded for this attempt.".to_owned(),
+            execution_id: Some(execution.execution_id.to_string()),
+            attempt_id: Some(attempt.attempt_id.to_string()),
+        });
+    }
+    diagnostics
+}
+
 fn page_size(value: Option<usize>) -> Result<usize, ApiError> {
     match value.unwrap_or(DEFAULT_PAGE_SIZE) {
         1..=MAX_PAGE_SIZE => Ok(value.unwrap_or(DEFAULT_PAGE_SIZE)),
@@ -559,8 +993,13 @@ mod tests {
     use serde_json::Value;
     use tower::ServiceExt;
     use workengine_adapters_store::SqliteStore;
-    use workengine_application::{SystemClock, WorkStore, create};
-    use workengine_domain::{Work, WorkAttributes, WorkEvent, WorkId, WorkStatus};
+    use workengine_application::{AttemptClaim, AttemptRecorder, SystemClock, WorkStore, create};
+    use workengine_domain::{
+        AttemptId, CONFIRMED_OUTCOME_SCHEMA_VERSION, ChannelPolicy, ConfirmedOutcome,
+        ContentDigest, EXECUTION_SPEC_SCHEMA_VERSION, ExecutionId, ExecutionSpec,
+        OUTCOME_SCHEMA_VERSION, Outcome, OutcomeKind, RuntimeKind, SecretRef, SecretSource, Work,
+        WorkAttributes, WorkEvent, WorkId, WorkStatus,
+    };
 
     use super::*;
 
@@ -900,6 +1339,123 @@ mod tests {
             missing_api.headers()[header::CONTENT_TYPE],
             "application/json"
         );
+    }
+
+    #[tokio::test]
+    async fn execution_observation_has_finite_redacted_proof_links() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = SqliteStore::open(directory.path()).unwrap();
+        let work = ready_work("work-proof", "explain the outcome", "stub", 10);
+        store.put(&work, WorkEvent::created(&work)).unwrap();
+        let spec = ExecutionSpec::new(
+            EXECUTION_SPEC_SCHEMA_VERSION,
+            work.id().clone(),
+            "stub",
+            ContentDigest::parse(format!("sha256:{}", "1".repeat(64))).unwrap(),
+            RuntimeKind::Stub,
+            ContentDigest::parse(format!("sha256:{}", "2".repeat(64))).unwrap(),
+            5_000,
+            1,
+            ChannelPolicy::RetryThenFail,
+            vec![
+                SecretRef::new(
+                    "TOKEN",
+                    SecretSource::environment_variable("WORKENGINE_TOKEN").unwrap(),
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+        let execution_id = ExecutionId::parse("execution-proof").unwrap();
+        let attempt_id = AttemptId::parse("attempt-proof").unwrap();
+        let mut running = work.clone();
+        running.start().unwrap();
+        running.bind_workspace("/secret/workspace/path").unwrap();
+        store
+            .claim_attempt(&AttemptClaim {
+                execution_id: &execution_id,
+                attempt_id: &attempt_id,
+                spec: &spec,
+                work: &running,
+                event: WorkEvent::started(&running, WorkStatus::Ready, 11),
+                started_at_unix_ms: 11,
+            })
+            .unwrap();
+        store
+            .record_process_event(
+                work.id(),
+                &execution_id,
+                &attempt_id,
+                workengine_application::ProcessEvent::Spawned,
+                12,
+            )
+            .unwrap();
+        store
+            .record_process_event(
+                work.id(),
+                &execution_id,
+                &attempt_id,
+                workengine_application::ProcessEvent::ChildStdout,
+                12,
+            )
+            .unwrap();
+        let outcome = Outcome::new(OUTCOME_SCHEMA_VERSION, OutcomeKind::Succeeded, "stub").unwrap();
+        let confirmed = ConfirmedOutcome::new(
+            CONFIRMED_OUTCOME_SCHEMA_VERSION,
+            execution_id,
+            attempt_id,
+            &spec,
+            outcome,
+            13,
+        )
+        .unwrap();
+        let mut succeeded = running;
+        succeeded.complete(confirmed.outcome()).unwrap();
+        store
+            .confirm_attempt(
+                &succeeded,
+                WorkEvent::completed(&succeeded, WorkStatus::Running, OutcomeKind::Succeeded, 13),
+                &confirmed,
+            )
+            .unwrap();
+        drop(store);
+
+        let app = router(observer_state(directory.path()));
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get("/api/v0/works/work-proof/observation")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let observation = json(response).await;
+        assert_eq!(observation["executions"][0]["spec"]["runtimeKind"], "stub");
+        let process_records = observation["executions"][0]["attempts"][0]["processRecords"]
+            .as_array()
+            .unwrap();
+        let stdout = process_records
+            .iter()
+            .find(|record| record["event"] == "child_stdout")
+            .unwrap();
+        assert_eq!(stdout["payloadRedacted"], true);
+        assert_eq!(observation["diagnostics"][0]["code"], "confirmed_success");
+        assert_eq!(observation["artifacts"].as_array().unwrap().len(), 3);
+        let encoded = serde_json::to_string(&observation).unwrap();
+        assert!(!encoded.contains("/secret/workspace/path"));
+        assert!(!encoded.contains("payload\":"));
+
+        for artifact in observation["artifacts"].as_array().unwrap() {
+            let href = artifact["href"].as_str().unwrap();
+            let proof = app
+                .clone()
+                .oneshot(Request::get(href).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(proof.status(), StatusCode::OK, "{href}");
+        }
     }
 
     #[test]

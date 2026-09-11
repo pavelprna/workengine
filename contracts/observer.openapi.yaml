@@ -55,6 +55,48 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
+  /api/v0/works/{workId}/observation:
+    get:
+      operationId: getWorkObservation
+      description: Read-only execution, attempt, proof-artifact, and diagnostic projection. Child output payloads are never returned.
+      parameters:
+        - { name: workId, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Complete execution observation for one Work, content: { application/json: { schema: { $ref: '#/components/schemas/WorkObservation' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/v0/works/{workId}/executions/{executionId}/spec:
+    get:
+      operationId: getExecutionSpecProof
+      parameters:
+        - { name: workId, in: path, required: true, schema: { type: string } }
+        - { name: executionId, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Immutable execution specification proof, content: { application/json: { schema: { $ref: '#/components/schemas/ExecutionSpecProof' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/v0/works/{workId}/executions/{executionId}/attempts/{attemptId}/process-records:
+    get:
+      operationId: getProcessRecordsProof
+      parameters:
+        - { name: workId, in: path, required: true, schema: { type: string } }
+        - { name: executionId, in: path, required: true, schema: { type: string } }
+        - { name: attemptId, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Bounded payload-free process record summaries, content: { application/json: { schema: { $ref: '#/components/schemas/ProcessRecordsProof' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/v0/works/{workId}/executions/{executionId}/attempts/{attemptId}/outcome:
+    get:
+      operationId: getConfirmedOutcomeProof
+      parameters:
+        - { name: workId, in: path, required: true, schema: { type: string } }
+        - { name: executionId, in: path, required: true, schema: { type: string } }
+        - { name: attemptId, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Control-plane confirmed outcome proof, content: { application/json: { schema: { $ref: '#/components/schemas/ConfirmedOutcomeProof' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
   /api/v0/events:
     get:
       operationId: listEvents
@@ -145,6 +187,115 @@ components:
       properties:
         items: { type: array, items: { $ref: '#/components/schemas/Event' } }
         nextCursor: { type: [string, 'null'] }
+    WorkObservation:
+      type: object
+      required: [executions, artifacts, diagnostics]
+      properties:
+        executions: { type: array, items: { $ref: '#/components/schemas/Execution' } }
+        artifacts: { type: array, items: { $ref: '#/components/schemas/Artifact' } }
+        diagnostics: { type: array, items: { $ref: '#/components/schemas/Diagnostic' } }
+    Execution:
+      type: object
+      required: [executionId, createdAtUnixMs, spec, attempts]
+      properties:
+        executionId: { type: string }
+        createdAtUnixMs: { type: string, pattern: '^[0-9]+$' }
+        spec: { $ref: '#/components/schemas/ExecutionSpec' }
+        attempts: { type: array, items: { $ref: '#/components/schemas/Attempt' } }
+    ExecutionSpec:
+      type: object
+      required: [schemaVersion, workerProfile, workerConfigDigest, runtimeKind, runtimeDigest, wallClockBudgetMs, retryLimit, channelPolicy, secretRefs]
+      properties:
+        schemaVersion: { type: integer, const: 1 }
+        workerProfile: { type: string }
+        workerConfigDigest: { type: string }
+        runtimeKind: { type: string, enum: [stub, bubblewrap, oci, unknown] }
+        runtimeDigest: { type: string }
+        wallClockBudgetMs: { type: string, pattern: '^[0-9]+$' }
+        retryLimit: { type: integer, minimum: 0 }
+        channelPolicy: { type: string, enum: [fail, park, retry_then_fail] }
+        secretRefs: { type: array, items: { $ref: '#/components/schemas/SecretRef' } }
+    SecretRef:
+      type: object
+      required: [name, source]
+      properties:
+        name: { type: string }
+        source: { type: string }
+    Attempt:
+      type: object
+      required: [attemptId, state, retryOrdinal, startedAtUnixMs, lastHeartbeatAtUnixMs, checkpoint, processRecords]
+      properties:
+        attemptId: { type: string }
+        state: { type: string, enum: [active, confirmed, retried, parked] }
+        retryOrdinal: { type: integer, minimum: 0 }
+        startedAtUnixMs: { type: string, pattern: '^[0-9]+$' }
+        lastHeartbeatAtUnixMs: { type: string, pattern: '^[0-9]+$' }
+        finishedAtUnixMs: { type: [string, 'null'], pattern: '^[0-9]+$' }
+        terminalReason: { type: [string, 'null'] }
+        checkpoint: { type: string, enum: [recorded, not_recorded] }
+        processRecords: { type: array, items: { $ref: '#/components/schemas/ProcessRecord' } }
+        confirmedOutcome:
+          oneOf:
+            - { $ref: '#/components/schemas/ConfirmedOutcome' }
+            - { type: 'null' }
+    ProcessRecord:
+      type: object
+      required: [event, occurrences, firstObservedAtUnixMs, lastObservedAtUnixMs, payloadRedacted]
+      properties:
+        event: { type: string, enum: [spawned, exited, killed, child_stdout, child_stderr] }
+        occurrences: { type: string, pattern: '^[0-9]+$' }
+        firstObservedAtUnixMs: { type: string, pattern: '^[0-9]+$' }
+        lastObservedAtUnixMs: { type: string, pattern: '^[0-9]+$' }
+        payloadRedacted: { type: boolean }
+    ConfirmedOutcome:
+      type: object
+      required: [schemaVersion, kind, workerProfile, confirmedAtUnixMs]
+      properties:
+        schemaVersion: { type: integer, const: 1 }
+        kind: { type: string, enum: [succeeded, failed, timed_out, budget_exceeded, channel_error] }
+        workerProfile: { type: string }
+        confirmedAtUnixMs: { type: string, pattern: '^[0-9]+$' }
+    Artifact:
+      type: object
+      required: [kind, label, href, executionId, authoredBy, createdAtUnixMs]
+      properties:
+        kind: { type: string, enum: [execution_spec, process_records, confirmed_outcome] }
+        label: { type: string }
+        href: { type: string }
+        executionId: { type: string }
+        attemptId: { type: [string, 'null'] }
+        authoredBy: { type: string }
+        createdAtUnixMs: { type: string, pattern: '^[0-9]+$' }
+    Diagnostic:
+      type: object
+      required: [severity, code, message]
+      properties:
+        severity: { type: string, enum: [info, warning, error] }
+        code: { type: string }
+        message: { type: string }
+        executionId: { type: [string, 'null'] }
+        attemptId: { type: [string, 'null'] }
+    ExecutionSpecProof:
+      allOf:
+        - { $ref: '#/components/schemas/ProofBase' }
+        - { type: object, required: [data], properties: { data: { $ref: '#/components/schemas/ExecutionSpec' } } }
+    ProcessRecordsProof:
+      allOf:
+        - { $ref: '#/components/schemas/ProofBase' }
+        - { type: object, required: [data], properties: { data: { type: array, items: { $ref: '#/components/schemas/ProcessRecord' } } } }
+    ConfirmedOutcomeProof:
+      allOf:
+        - { $ref: '#/components/schemas/ProofBase' }
+        - { type: object, required: [data], properties: { data: { $ref: '#/components/schemas/ConfirmedOutcome' } } }
+    ProofBase:
+      type: object
+      required: [schemaVersion, kind, workId, executionId]
+      properties:
+        schemaVersion: { type: integer, const: 1 }
+        kind: { type: string }
+        workId: { type: string }
+        executionId: { type: string }
+        attemptId: { type: [string, 'null'] }
     Error:
       type: object
       required: [code, message]
