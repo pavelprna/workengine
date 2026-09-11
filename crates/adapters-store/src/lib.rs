@@ -5,15 +5,20 @@ use std::str::FromStr;
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
-use workengine_application::{AppError, AttemptClaim, SequencedEvent, WorkQuery, WorkStore};
+use workengine_application::{
+    AppError, AttemptClaim, AttemptObservation, AttemptRecorder, AttemptState,
+    ConfirmedOutcomeObservation, ExecutionObservation, ExecutionSpecObservation, ProcessEvent,
+    ProcessRecordObservation, SecretRefObservation, SequencedEvent, WorkQuery, WorkStore,
+};
 use workengine_domain::{
-    AttemptId, ConfirmedOutcome, EVENT_SCHEMA_VERSION, EventKind, ExecutionId, ExecutionSpec,
-    OutcomeKind, Work, WorkAttributes, WorkEvent, WorkId, WorkStatus,
+    AttemptId, CONFIRMED_OUTCOME_SCHEMA_VERSION, ConfirmedOutcome, ContentDigest,
+    EVENT_SCHEMA_VERSION, EXECUTION_SPEC_SCHEMA_VERSION, EventKind, ExecutionId, ExecutionSpec,
+    OutcomeKind, SecretRef, SecretSource, Work, WorkAttributes, WorkEvent, WorkId, WorkStatus,
 };
 
 const WORK_SCHEMA_VERSION: u32 = 1;
 /// SQLite `user_version`. Distinct from per-row `schema_version` on Work.
-const STORE_USER_VERSION: i32 = 3;
+const STORE_USER_VERSION: i32 = 4;
 
 const MIGRATION_1: &str = "
 CREATE TABLE IF NOT EXISTS works (
@@ -75,6 +80,25 @@ CREATE TABLE IF NOT EXISTS confirmed_outcomes (
 );
 ";
 
+const MIGRATION_4: &str = "
+ALTER TABLE attempts ADD COLUMN last_heartbeat_at_unix_ms INTEGER;
+ALTER TABLE attempts ADD COLUMN finished_at_unix_ms INTEGER;
+UPDATE attempts
+SET last_heartbeat_at_unix_ms = created_at_unix_ms
+WHERE last_heartbeat_at_unix_ms IS NULL;
+CREATE TABLE IF NOT EXISTS attempt_process_records (
+    attempt_id TEXT NOT NULL REFERENCES attempts(id),
+    execution_id TEXT NOT NULL REFERENCES executions(id),
+    work_id TEXT NOT NULL REFERENCES works(id),
+    event TEXT NOT NULL,
+    occurrences INTEGER NOT NULL,
+    first_observed_at_unix_ms INTEGER NOT NULL,
+    last_observed_at_unix_ms INTEGER NOT NULL,
+    payload_redacted INTEGER NOT NULL,
+    PRIMARY KEY (attempt_id, event)
+);
+";
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EventPayload {
@@ -103,11 +127,34 @@ struct ExecutionSpecPayload<'a> {
     work_id: &'a str,
     worker_profile: &'a str,
     worker_config_digest: &'a str,
+    runtime_kind: &'a str,
     runtime_digest: &'a str,
     wall_clock_budget_ms: u64,
     retry_limit: u32,
     channel_policy: &'a str,
     secret_refs: Vec<SecretRefPayload<'a>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredExecutionSpecPayload {
+    schema_version: u32,
+    work_id: String,
+    worker_profile: String,
+    worker_config_digest: String,
+    #[serde(default)]
+    runtime_kind: Option<String>,
+    runtime_digest: String,
+    wall_clock_budget_ms: u64,
+    retry_limit: u32,
+    channel_policy: String,
+    secret_refs: Vec<StoredSecretRefPayload>,
+}
+
+#[derive(Deserialize)]
+struct StoredSecretRefPayload {
+    name: String,
+    source: String,
 }
 
 #[derive(Serialize)]
@@ -126,6 +173,18 @@ struct ConfirmedOutcomePayload<'a> {
     attempt_id: &'a str,
     kind: &'a str,
     worker_profile: &'a str,
+    confirmed_at_unix_ms: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredConfirmedOutcomePayload {
+    schema_version: u32,
+    work_id: String,
+    execution_id: String,
+    attempt_id: String,
+    kind: String,
+    worker_profile: String,
     confirmed_at_unix_ms: u64,
 }
 
@@ -281,6 +340,235 @@ fn events_connection(conn: &Connection, id: &WorkId) -> Result<Vec<WorkEvent>, A
     Ok(events)
 }
 
+fn executions_connection(
+    conn: &Connection,
+    work_id: &WorkId,
+) -> Result<Vec<ExecutionObservation>, AppError> {
+    let mut statement = conn
+        .prepare(
+            "SELECT id, spec_payload, created_at_unix_ms
+             FROM executions WHERE work_id = ?1
+             ORDER BY created_at_unix_ms, id",
+        )
+        .map_err(AppError::store)?;
+    let rows = statement
+        .query_map([work_id.as_str()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })
+        .map_err(AppError::store)?;
+    let mut executions = Vec::new();
+    for row in rows {
+        let (execution_id, payload, created_at) = row.map_err(AppError::store)?;
+        let execution_id = ExecutionId::parse(execution_id)?;
+        let payload: StoredExecutionSpecPayload =
+            serde_json::from_str(&payload).map_err(AppError::outcome_schema)?;
+        validate_execution_spec_payload(&payload)?;
+        if payload.work_id != work_id.as_str() {
+            return Err(AppError::store("execution payload has foreign Work id"));
+        }
+        let attempts = attempt_observations(conn, work_id, &execution_id)?;
+        executions.push(ExecutionObservation {
+            execution_id,
+            work_id: work_id.clone(),
+            created_at_unix_ms: unsigned(created_at, "execution created time")?,
+            spec: ExecutionSpecObservation {
+                schema_version: payload.schema_version,
+                worker_profile: payload.worker_profile,
+                worker_config_digest: payload.worker_config_digest,
+                runtime_kind: payload.runtime_kind,
+                runtime_digest: payload.runtime_digest,
+                wall_clock_budget_ms: payload.wall_clock_budget_ms,
+                retry_limit: payload.retry_limit,
+                channel_policy: payload.channel_policy,
+                secret_refs: payload
+                    .secret_refs
+                    .into_iter()
+                    .map(|reference| SecretRefObservation {
+                        name: reference.name,
+                        source: reference.source,
+                    })
+                    .collect(),
+            },
+            attempts,
+        });
+    }
+    Ok(executions)
+}
+
+fn attempt_observations(
+    conn: &Connection,
+    work_id: &WorkId,
+    execution_id: &ExecutionId,
+) -> Result<Vec<AttemptObservation>, AppError> {
+    let mut statement = conn
+        .prepare(
+            "SELECT id, state, created_at_unix_ms,
+                    COALESCE(last_heartbeat_at_unix_ms, created_at_unix_ms),
+                    finished_at_unix_ms, terminal_reason
+             FROM attempts WHERE execution_id = ?1
+             ORDER BY created_at_unix_ms, id",
+        )
+        .map_err(AppError::store)?;
+    let rows = statement
+        .query_map([execution_id.as_str()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+            ))
+        })
+        .map_err(AppError::store)?;
+    let mut attempts = Vec::new();
+    for (retry_ordinal, row) in rows.enumerate() {
+        let (attempt_id, state, started_at, heartbeat_at, finished_at, terminal_reason) =
+            row.map_err(AppError::store)?;
+        let attempt_id = AttemptId::parse(attempt_id)?;
+        attempts.push(AttemptObservation {
+            process_records: process_record_observations(conn, &attempt_id)?,
+            confirmed_outcome: confirmed_outcome_observation(
+                conn,
+                work_id,
+                execution_id,
+                &attempt_id,
+            )?,
+            attempt_id,
+            state: AttemptState::parse(&state)?,
+            retry_ordinal: u32::try_from(retry_ordinal)
+                .map_err(|_| AppError::store("attempt retry ordinal overflow"))?,
+            started_at_unix_ms: unsigned(started_at, "attempt start time")?,
+            last_heartbeat_at_unix_ms: unsigned(heartbeat_at, "attempt heartbeat time")?,
+            finished_at_unix_ms: finished_at
+                .map(|value| unsigned(value, "attempt finish time"))
+                .transpose()?,
+            terminal_reason,
+            checkpoint_recorded: false,
+        });
+    }
+    Ok(attempts)
+}
+
+fn process_record_observations(
+    conn: &Connection,
+    attempt_id: &AttemptId,
+) -> Result<Vec<ProcessRecordObservation>, AppError> {
+    let mut statement = conn
+        .prepare(
+            "SELECT event, occurrences, first_observed_at_unix_ms,
+                    last_observed_at_unix_ms, payload_redacted
+             FROM attempt_process_records WHERE attempt_id = ?1
+             ORDER BY first_observed_at_unix_ms, event",
+        )
+        .map_err(AppError::store)?;
+    let rows = statement
+        .query_map([attempt_id.as_str()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, bool>(4)?,
+            ))
+        })
+        .map_err(AppError::store)?;
+    let mut records = Vec::new();
+    for row in rows {
+        let (event, occurrences, first_at, last_at, payload_redacted) =
+            row.map_err(AppError::store)?;
+        records.push(ProcessRecordObservation {
+            event: ProcessEvent::parse(&event)?,
+            occurrences: unsigned(occurrences, "process record occurrences")?,
+            first_observed_at_unix_ms: unsigned(first_at, "process record first time")?,
+            last_observed_at_unix_ms: unsigned(last_at, "process record last time")?,
+            payload_redacted,
+        });
+    }
+    Ok(records)
+}
+
+fn confirmed_outcome_observation(
+    conn: &Connection,
+    work_id: &WorkId,
+    execution_id: &ExecutionId,
+    attempt_id: &AttemptId,
+) -> Result<Option<ConfirmedOutcomeObservation>, AppError> {
+    let payload: Option<String> = conn
+        .query_row(
+            "SELECT payload FROM confirmed_outcomes
+             WHERE work_id = ?1 AND execution_id = ?2 AND attempt_id = ?3",
+            params![work_id.as_str(), execution_id.as_str(), attempt_id.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(AppError::store)?;
+    let Some(payload) = payload else {
+        return Ok(None);
+    };
+    let payload: StoredConfirmedOutcomePayload =
+        serde_json::from_str(&payload).map_err(AppError::outcome_schema)?;
+    if payload.schema_version != CONFIRMED_OUTCOME_SCHEMA_VERSION {
+        return Err(AppError::from(
+            workengine_domain::DomainError::UnsupportedSchemaVersion(payload.schema_version),
+        ));
+    }
+    if payload.work_id != work_id.as_str()
+        || payload.execution_id != execution_id.as_str()
+        || payload.attempt_id != attempt_id.as_str()
+    {
+        return Err(AppError::store(
+            "confirmed outcome payload has foreign provenance",
+        ));
+    }
+    Ok(Some(ConfirmedOutcomeObservation {
+        schema_version: payload.schema_version,
+        kind: OutcomeKind::from_str(&payload.kind)?,
+        worker_profile: payload.worker_profile,
+        confirmed_at_unix_ms: payload.confirmed_at_unix_ms,
+    }))
+}
+
+fn validate_execution_spec_payload(payload: &StoredExecutionSpecPayload) -> Result<(), AppError> {
+    if payload.schema_version != EXECUTION_SPEC_SCHEMA_VERSION {
+        return Err(AppError::from(
+            workengine_domain::DomainError::UnsupportedSchemaVersion(payload.schema_version),
+        ));
+    }
+    ContentDigest::parse(&payload.worker_config_digest)?;
+    ContentDigest::parse(&payload.runtime_digest)?;
+    if payload
+        .runtime_kind
+        .as_deref()
+        .is_some_and(|kind| !matches!(kind, "stub" | "bubblewrap" | "oci"))
+    {
+        return Err(AppError::store(
+            "execution payload has unknown runtime kind",
+        ));
+    }
+    if !matches!(
+        payload.channel_policy.as_str(),
+        "fail" | "park" | "retry_then_fail"
+    ) {
+        return Err(AppError::store(
+            "execution payload has unknown channel policy",
+        ));
+    }
+    for reference in &payload.secret_refs {
+        let source = SecretSource::environment_variable(&reference.source)?;
+        SecretRef::new(&reference.name, source)?;
+    }
+    Ok(())
+}
+
+fn unsigned(value: i64, field: &str) -> Result<u64, AppError> {
+    u64::try_from(value).map_err(|_| AppError::store(format!("negative {field}")))
+}
+
 macro_rules! impl_work_query {
     ($type:ty) => {
         impl WorkQuery for $type {
@@ -303,12 +591,108 @@ macro_rules! impl_work_query {
             ) -> Result<Vec<SequencedEvent>, AppError> {
                 events_after_connection(&self.conn, after_seq, work_id)
             }
+
+            fn executions(&self, id: &WorkId) -> Result<Vec<ExecutionObservation>, AppError> {
+                executions_connection(&self.conn, id)
+            }
         }
     };
 }
 
 impl_work_query!(SqliteStore);
 impl_work_query!(SqliteObserver);
+
+impl AttemptRecorder for SqliteStore {
+    fn heartbeat_attempt(
+        &mut self,
+        work_id: &WorkId,
+        execution_id: &ExecutionId,
+        attempt_id: &AttemptId,
+        observed_at_unix_ms: u64,
+    ) -> Result<(), AppError> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE attempts
+                 SET last_heartbeat_at_unix_ms = MAX(
+                    COALESCE(last_heartbeat_at_unix_ms, created_at_unix_ms), ?1
+                 )
+                 WHERE id = ?2 AND execution_id = ?3 AND state = 'active'
+                   AND EXISTS (
+                     SELECT 1 FROM works
+                     WHERE id = ?4 AND status = 'running'
+                       AND active_execution_id = ?3 AND active_attempt_id = ?2
+                   )",
+                params![
+                    observed_at_unix_ms as i64,
+                    attempt_id.as_str(),
+                    execution_id.as_str(),
+                    work_id.as_str(),
+                ],
+            )
+            .map_err(AppError::store)?;
+        if changed != 1 {
+            return Err(attempt_conflict(attempt_id));
+        }
+        Ok(())
+    }
+
+    fn record_process_event(
+        &mut self,
+        work_id: &WorkId,
+        execution_id: &ExecutionId,
+        attempt_id: &AttemptId,
+        event: ProcessEvent,
+        observed_at_unix_ms: u64,
+    ) -> Result<(), AppError> {
+        let tx = self.conn.transaction().map_err(AppError::store)?;
+        let changed = tx
+            .execute(
+                "UPDATE attempts
+                 SET last_heartbeat_at_unix_ms = MAX(
+                    COALESCE(last_heartbeat_at_unix_ms, created_at_unix_ms), ?1
+                 )
+                 WHERE id = ?2 AND execution_id = ?3 AND state = 'active'
+                   AND EXISTS (
+                     SELECT 1 FROM works
+                     WHERE id = ?4 AND status = 'running'
+                       AND active_execution_id = ?3 AND active_attempt_id = ?2
+                   )",
+                params![
+                    observed_at_unix_ms as i64,
+                    attempt_id.as_str(),
+                    execution_id.as_str(),
+                    work_id.as_str(),
+                ],
+            )
+            .map_err(AppError::store)?;
+        if changed != 1 {
+            return Err(attempt_conflict(attempt_id));
+        }
+        let payload_redacted =
+            matches!(event, ProcessEvent::ChildStdout | ProcessEvent::ChildStderr);
+        tx.execute(
+            "INSERT INTO attempt_process_records
+                 (attempt_id, execution_id, work_id, event, occurrences,
+                  first_observed_at_unix_ms, last_observed_at_unix_ms, payload_redacted)
+             VALUES (?1, ?2, ?3, ?4, 1, ?5, ?5, ?6)
+             ON CONFLICT(attempt_id, event) DO UPDATE SET
+                 occurrences = occurrences + 1,
+                 last_observed_at_unix_ms = MAX(last_observed_at_unix_ms, excluded.last_observed_at_unix_ms),
+                 payload_redacted = MAX(payload_redacted, excluded.payload_redacted)",
+            params![
+                attempt_id.as_str(),
+                execution_id.as_str(),
+                work_id.as_str(),
+                event.as_str(),
+                observed_at_unix_ms as i64,
+                payload_redacted,
+            ],
+        )
+        .map_err(AppError::store)?;
+        tx.commit().map_err(AppError::store)
+    }
+}
 
 impl WorkStore for SqliteStore {
     fn put(&mut self, work: &Work, event: WorkEvent) -> Result<(), AppError> {
@@ -334,8 +718,9 @@ impl WorkStore for SqliteStore {
         )
         .map_err(map_constraint_conflict)?;
         tx.execute(
-            "INSERT INTO attempts (id, execution_id, state, created_at_unix_ms)
-             VALUES (?1, ?2, 'active', ?3)",
+            "INSERT INTO attempts
+                 (id, execution_id, state, created_at_unix_ms, last_heartbeat_at_unix_ms)
+             VALUES (?1, ?2, 'active', ?3, ?3)",
             params![
                 claim.attempt_id.as_str(),
                 claim.execution_id.as_str(),
@@ -383,17 +768,24 @@ impl WorkStore for SqliteStore {
         let tx = self.conn.transaction().map_err(AppError::store)?;
         let changed = tx
             .execute(
-                "UPDATE attempts SET state = 'retried', terminal_reason = 'channel_retry'
+                "UPDATE attempts
+                 SET state = 'retried', terminal_reason = 'channel_retry',
+                     finished_at_unix_ms = ?3
                  WHERE id = ?1 AND execution_id = ?2 AND state = 'active'",
-                params![previous_attempt_id.as_str(), execution_id.as_str()],
+                params![
+                    previous_attempt_id.as_str(),
+                    execution_id.as_str(),
+                    started_at_unix_ms as i64,
+                ],
             )
             .map_err(AppError::store)?;
         if changed != 1 {
             return Err(attempt_conflict(previous_attempt_id));
         }
         tx.execute(
-            "INSERT INTO attempts (id, execution_id, state, created_at_unix_ms)
-             VALUES (?1, ?2, 'active', ?3)",
+            "INSERT INTO attempts
+                 (id, execution_id, state, created_at_unix_ms, last_heartbeat_at_unix_ms)
+             VALUES (?1, ?2, 'active', ?3, ?3)",
             params![
                 next_attempt_id.as_str(),
                 execution_id.as_str(),
@@ -446,12 +838,18 @@ impl WorkStore for SqliteStore {
         }
         let changed = tx
             .execute(
-                "UPDATE attempts SET state = 'confirmed', terminal_reason = ?1
+                "UPDATE attempts
+                 SET state = 'confirmed', terminal_reason = ?1,
+                     finished_at_unix_ms = ?4,
+                     last_heartbeat_at_unix_ms = MAX(
+                         COALESCE(last_heartbeat_at_unix_ms, created_at_unix_ms), ?4
+                     )
                  WHERE id = ?2 AND execution_id = ?3 AND state = 'active'",
                 params![
                     outcome.outcome().kind().as_str(),
                     outcome.attempt_id().as_str(),
                     outcome.execution_id().as_str(),
+                    outcome.confirmed_at_unix_ms() as i64,
                 ],
             )
             .map_err(AppError::store)?;
@@ -503,9 +901,18 @@ impl WorkStore for SqliteStore {
         }
         let changed = tx
             .execute(
-                "UPDATE attempts SET state = 'parked', terminal_reason = 'parked'
+                "UPDATE attempts
+                 SET state = 'parked', terminal_reason = 'parked',
+                     finished_at_unix_ms = ?3,
+                     last_heartbeat_at_unix_ms = MAX(
+                         COALESCE(last_heartbeat_at_unix_ms, created_at_unix_ms), ?3
+                     )
                  WHERE id = ?1 AND execution_id = ?2 AND state = 'active'",
-                params![attempt_id.as_str(), execution_id.as_str()],
+                params![
+                    attempt_id.as_str(),
+                    execution_id.as_str(),
+                    event.created_at_unix_ms() as i64,
+                ],
             )
             .map_err(AppError::store)?;
         if changed != 1 {
@@ -529,10 +936,16 @@ fn migrate(conn: &Connection) -> Result<(), AppError> {
         conn.execute_batch(MIGRATION_1).map_err(AppError::store)?;
         conn.execute_batch(MIGRATION_2).map_err(AppError::store)?;
         conn.execute_batch(MIGRATION_3).map_err(AppError::store)?;
+        conn.execute_batch(MIGRATION_4).map_err(AppError::store)?;
         conn.pragma_update(None, "user_version", STORE_USER_VERSION)
             .map_err(AppError::store)?;
     } else if current == 2 {
         conn.execute_batch(MIGRATION_3).map_err(AppError::store)?;
+        conn.execute_batch(MIGRATION_4).map_err(AppError::store)?;
+        conn.pragma_update(None, "user_version", STORE_USER_VERSION)
+            .map_err(AppError::store)?;
+    } else if current == 3 {
+        conn.execute_batch(MIGRATION_4).map_err(AppError::store)?;
         conn.pragma_update(None, "user_version", STORE_USER_VERSION)
             .map_err(AppError::store)?;
     }
@@ -626,6 +1039,7 @@ fn encode_execution_spec(spec: &ExecutionSpec) -> Result<String, AppError> {
         work_id: spec.work_id().as_str(),
         worker_profile: spec.worker_profile(),
         worker_config_digest: spec.worker_config_digest().as_str(),
+        runtime_kind: spec.runtime_kind().as_str(),
         runtime_digest: spec.runtime_digest().as_str(),
         wall_clock_budget_ms: spec.wall_clock_budget_ms(),
         retry_limit: spec.retry_limit(),
@@ -714,7 +1128,7 @@ mod tests {
     use workengine_domain::{
         AttemptId, CONFIRMED_OUTCOME_SCHEMA_VERSION, ChannelPolicy, ConfirmedOutcome,
         ContentDigest, EXECUTION_SPEC_SCHEMA_VERSION, ExecutionId, ExecutionSpec,
-        OUTCOME_SCHEMA_VERSION, Outcome, OutcomeKind, replay,
+        OUTCOME_SCHEMA_VERSION, Outcome, OutcomeKind, RuntimeKind, replay,
     };
 
     fn store() -> (SqliteStore, tempfile::TempDir) {
@@ -732,15 +1146,24 @@ mod tests {
     }
 
     fn execution_spec(work: &Work) -> ExecutionSpec {
+        execution_spec_with_retry(work, 0)
+    }
+
+    fn execution_spec_with_retry(work: &Work, retry_limit: u32) -> ExecutionSpec {
         ExecutionSpec::new(
             EXECUTION_SPEC_SCHEMA_VERSION,
             work.id().clone(),
             work.attributes().worker_profile(),
             ContentDigest::parse(format!("sha256:{}", "1".repeat(64))).unwrap(),
+            RuntimeKind::Stub,
             ContentDigest::parse(format!("sha256:{}", "2".repeat(64))).unwrap(),
             5_000,
-            0,
-            ChannelPolicy::Fail,
+            retry_limit,
+            if retry_limit == 0 {
+                ChannelPolicy::Fail
+            } else {
+                ChannelPolicy::RetryThenFail
+            },
             Vec::new(),
         )
         .unwrap()
@@ -898,7 +1321,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("workengine.sqlite");
         let conn = Connection::open(&path).unwrap();
-        conn.pragma_update(None, "user_version", 4).unwrap();
+        conn.pragma_update(None, "user_version", 5).unwrap();
         drop(conn);
         let err = match SqliteStore::open(dir.path()) {
             Ok(_) => panic!("expected unknown store version to fail"),
@@ -906,7 +1329,7 @@ mod tests {
         };
         assert!(matches!(
             err,
-            AppError::Domain(workengine_domain::DomainError::UnsupportedSchemaVersion(4))
+            AppError::Domain(workengine_domain::DomainError::UnsupportedSchemaVersion(5))
         ));
     }
 
@@ -965,6 +1388,145 @@ mod tests {
             WorkStatus::Running
         );
         assert_eq!(store.events(work.id()).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn execution_projection_is_typed_redacted_and_lease_scoped() {
+        let (mut store, _dir) = store();
+        let work = sample();
+        store.put(&work, WorkEvent::created(&work)).unwrap();
+        let spec = execution_spec_with_retry(&work, 1);
+        let execution_id = ExecutionId::parse("execution-observed").unwrap();
+        let attempt_id = AttemptId::parse("attempt-observed").unwrap();
+        let retry_attempt_id = AttemptId::parse("attempt-retry").unwrap();
+        let mut running = work.clone();
+        running.start().unwrap();
+        running.bind_workspace("/workspace/work-1").unwrap();
+        store
+            .claim_attempt(&AttemptClaim {
+                execution_id: &execution_id,
+                attempt_id: &attempt_id,
+                spec: &spec,
+                work: &running,
+                event: WorkEvent::started(&running, WorkStatus::Ready, 8),
+                started_at_unix_ms: 8,
+            })
+            .unwrap();
+        store
+            .record_process_event(
+                work.id(),
+                &execution_id,
+                &attempt_id,
+                ProcessEvent::Spawned,
+                9,
+            )
+            .unwrap();
+        for observed_at in [10, 11] {
+            store
+                .record_process_event(
+                    work.id(),
+                    &execution_id,
+                    &attempt_id,
+                    ProcessEvent::ChildStdout,
+                    observed_at,
+                )
+                .unwrap();
+        }
+        store
+            .heartbeat_attempt(work.id(), &execution_id, &attempt_id, 12)
+            .unwrap();
+        store
+            .retry_attempt(&execution_id, &attempt_id, &retry_attempt_id, 13)
+            .unwrap();
+        let stale_before_confirmation = store.record_process_event(
+            work.id(),
+            &execution_id,
+            &attempt_id,
+            ProcessEvent::ChildStderr,
+            13,
+        );
+        assert!(matches!(
+            stale_before_confirmation,
+            Err(AppError::Conflict(_))
+        ));
+        store
+            .record_process_event(
+                work.id(),
+                &execution_id,
+                &retry_attempt_id,
+                ProcessEvent::Spawned,
+                13,
+            )
+            .unwrap();
+        store
+            .record_process_event(
+                work.id(),
+                &execution_id,
+                &retry_attempt_id,
+                ProcessEvent::Exited,
+                14,
+            )
+            .unwrap();
+        let outcome = Outcome::new(OUTCOME_SCHEMA_VERSION, OutcomeKind::Succeeded, "stub").unwrap();
+        let confirmed = ConfirmedOutcome::new(
+            CONFIRMED_OUTCOME_SCHEMA_VERSION,
+            execution_id.clone(),
+            retry_attempt_id.clone(),
+            &spec,
+            outcome,
+            15,
+        )
+        .unwrap();
+        let mut succeeded = running;
+        succeeded.complete(confirmed.outcome()).unwrap();
+        store
+            .confirm_attempt(
+                &succeeded,
+                WorkEvent::completed(&succeeded, WorkStatus::Running, OutcomeKind::Succeeded, 15),
+                &confirmed,
+            )
+            .unwrap();
+
+        let executions = store.executions(work.id()).unwrap();
+        assert_eq!(executions.len(), 1);
+        let execution = &executions[0];
+        assert_eq!(execution.spec.runtime_kind.as_deref(), Some("stub"));
+        assert_eq!(execution.spec.wall_clock_budget_ms, 5_000);
+        assert_eq!(execution.spec.retry_limit, 1);
+        assert_eq!(execution.attempts.len(), 2);
+        let first_attempt = &execution.attempts[0];
+        assert_eq!(first_attempt.state, AttemptState::Retried);
+        assert_eq!(first_attempt.retry_ordinal, 0);
+        assert_eq!(
+            first_attempt.terminal_reason.as_deref(),
+            Some("channel_retry")
+        );
+        let stdout = first_attempt
+            .process_records
+            .iter()
+            .find(|record| record.event == ProcessEvent::ChildStdout)
+            .unwrap();
+        assert_eq!(stdout.occurrences, 2);
+        assert!(stdout.payload_redacted);
+
+        let attempt = &execution.attempts[1];
+        assert_eq!(attempt.state, AttemptState::Confirmed);
+        assert_eq!(attempt.retry_ordinal, 1);
+        assert_eq!(attempt.last_heartbeat_at_unix_ms, 15);
+        assert_eq!(attempt.terminal_reason.as_deref(), Some("succeeded"));
+        assert_eq!(
+            attempt.confirmed_outcome.as_ref().unwrap().kind,
+            OutcomeKind::Succeeded
+        );
+
+        let stale = store.record_process_event(
+            work.id(),
+            &execution_id,
+            &retry_attempt_id,
+            ProcessEvent::ChildStderr,
+            16,
+        );
+        assert!(matches!(stale, Err(AppError::Conflict(_))));
     }
 
     #[test]
