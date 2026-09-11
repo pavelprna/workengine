@@ -28,3 +28,6 @@ apps/web/tsconfig.tsbuildinfo
 !.env.example
 *.pem
 *.key
+
+# Local Workengine data
+.workengine/
