@@ -34,11 +34,13 @@ finite catalogue of control-plane proof artifacts. v0.5 adds the localhost
 daemon as lifecycle owner, daemon-client CLI commands, checkpointed park,
 distinct abort, same-execution resume, durable answers and consent, and
 ownership-checked crash reclamation. External dependencies sit behind
-application ports. It does not yet have capture, external inbound sources, or
-publishers. v0.6 closes the local Worker policy with verified runtime digests,
+application ports. v0.6 closes the local Worker policy with verified runtime digests,
 finite resource limits, mandatory seccomp and capability dropping,
 deny-by-default brokered egress, no-follow control-plane file handling, and a
-cleared runtime environment.
+cleared runtime environment. v0.7 adds project-scoped capture, relation-aware
+queueing, centralized quotas, explicit-signal inbound receipts, a best-effort
+publication outbox with targeted park notification, and expected-context CAS
+remote mutation boundaries.
 
 The sandboxed-attempt decision is accepted. Attempt IDs, immutable execution
 snapshots, per-Work active leases, and confirmed outcomes are present;

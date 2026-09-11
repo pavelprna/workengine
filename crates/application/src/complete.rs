@@ -39,7 +39,7 @@ pub fn complete(
     let from = work.status();
     match work.complete(outcome)? {
         Apply::Idempotent { status } => {
-            workspaces.record_memory(id, status, outcome.kind())?;
+            workspaces.record_memory(id, work.attributes().project_id(), status, outcome.kind())?;
             Ok(work)
         }
         Apply::Changed { to, .. } => {
@@ -47,7 +47,7 @@ pub fn complete(
                 &work,
                 WorkEvent::completed(&work, from, outcome.kind(), clock.unix_ms()),
             )?;
-            workspaces.record_memory(id, to, outcome.kind())?;
+            workspaces.record_memory(id, work.attributes().project_id(), to, outcome.kind())?;
             Ok(work)
         }
     }

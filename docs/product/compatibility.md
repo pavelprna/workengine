@@ -13,7 +13,7 @@ These are public contracts. A breaking change is a major version, plus a migrati
 
 | Surface | Compatibility |
 | --- | --- |
-| CLI command names (`create`, `next`, `start`, `resume`, `park`, `abort`, `answer`, `consent`, `serve`, `digest-rootfs`, `version`) | Stable |
+| CLI command names (`create`, `next`, `run-next`, `relate`, `quota-set`, `start`, `resume`, `park`, `abort`, `answer`, `consent`, `serve`, `digest-rootfs`, `version`) | Stable |
 | CLI `version` prefix | `workengine <semver>` where semver is `CARGO_PKG_VERSION` |
 | CLI flags and env vars documented in `--help` | Stable (`--config-dir` / `WORKENGINE_CONFIG_DIR`, `--daemon-port` / `WORKENGINE_DAEMON_PORT`; `start --checkout` is retained but rejected across the daemon boundary, so checkout belongs in the profile) |
 | Process exit codes | Stable; see table below |

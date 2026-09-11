@@ -16,7 +16,7 @@ Workengine is a hexagonal control plane. Layers are Cargo crates. A forbidden de
                    v
 +------------------------------------------------------+
 |  application                                          |
-|  create / next / start / complete / control / input  |
+| create / capture / start / complete / integration   |
 |  ports = traits                                       |
 +------------------+-------------------+---------------+
                    |                   |
@@ -38,8 +38,9 @@ attempts, heartbeat, bounded redacted process metadata, diagnostics, and a
 finite control-plane proof catalogue. Lifecycle routes invoke the daemon-owned
 application path through a control supplied by the composition root. CLI
 mutation commands are localhost clients of the same routes. Park, abort,
-resume, answer, and consent wait for server-confirmed state. Publishers remain
-later work.
+resume, answer, consent, and project-scoped queue capture wait for
+server-confirmed state. External sources and publishers run independently
+through integration ports and durable receipt/outbox records.
 
 ## Crates
 
@@ -50,6 +51,7 @@ later work.
 | `crates/adapters-store` | `workengine-adapters-store` | `WorkStore` implementations. |
 | `crates/adapters-worker` | `workengine-adapters-worker` | `WorkerRunner` implementations (stub and generic process). |
 | `crates/adapters-workspace` | `workengine-adapters-workspace` | `WorkspaceFactory` implementations. |
+| `crates/adapters-integrations` | `workengine-adapters-integrations` | Explicit-signal JSONL inbound, best-effort JSONL publication, and isolated integration jobs. |
 | `crates/adapters-http` | `workengine-adapters-http` | Localhost daemon transport, HTTP/SSE observer and control client, and embedded Web UI. |
 | `crates/cli` | `workengine-cli` (bin `workengine`) | Composition root. |
 
@@ -61,8 +63,9 @@ workengine-cli
   │     └── workengine-domain
   ├── workengine-adapters-store      → application + domain
   ├── workengine-adapters-worker     → application + domain
-  └── workengine-adapters-workspace  → application + domain
-  └── workengine-adapters-http        → application + store
+  ├── workengine-adapters-workspace  → application + domain
+  ├── workengine-adapters-integrations → application + domain
+  └── workengine-adapters-http       → application + store
 ```
 
 Do not split further on day one. Inside a crate, use modules.

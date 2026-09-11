@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use workengine_application::{AppError, BindRequest, OperatorInput, WorkspaceFactory};
-use workengine_domain::{AttemptId, ExecutionId, OutcomeKind, WorkId, WorkStatus};
+use workengine_domain::{AttemptId, ExecutionId, OutcomeKind, ProjectId, WorkId, WorkStatus};
 
 const MEMORY_SCHEMA_VERSION: u32 = 1;
 pub const GOAL_FILE: &str = "workengine-goal.txt";
@@ -47,14 +47,24 @@ impl DirWorkspaceFactory {
         }
     }
 
-    fn dir(&self, work_id: &WorkId) -> PathBuf {
-        self.root.join(work_id.as_str())
+    fn dir(&self, project_id: &ProjectId, work_id: &WorkId) -> PathBuf {
+        let scoped = self.root.join(project_id.as_str()).join(work_id.as_str());
+        let legacy = self.root.join(work_id.as_str());
+        if project_id == &ProjectId::default_project() && legacy.exists() && !scoped.exists() {
+            legacy
+        } else {
+            scoped
+        }
     }
 }
 
 impl WorkspaceFactory for DirWorkspaceFactory {
     fn bind(&self, request: &BindRequest<'_>) -> Result<PathBuf, AppError> {
-        let path = self.dir(request.work_id);
+        let project_path = self.root.join(request.project_id.as_str());
+        reject_symlink(&project_path, "project workspace path")?;
+        fs::create_dir_all(&project_path).map_err(AppError::workspace)?;
+        restrict_directory(&project_path)?;
+        let path = self.dir(request.project_id, request.work_id);
         if path
             .symlink_metadata()
             .map(|metadata| metadata.file_type().is_symlink())
@@ -72,8 +82,12 @@ impl WorkspaceFactory for DirWorkspaceFactory {
         Ok(path)
     }
 
-    fn read_artifact(&self, work_id: &WorkId) -> Result<Option<Vec<u8>>, AppError> {
-        let path = self.dir(work_id).join("outcome.json");
+    fn read_artifact(
+        &self,
+        work_id: &WorkId,
+        project_id: &ProjectId,
+    ) -> Result<Option<Vec<u8>>, AppError> {
+        let path = self.dir(project_id, work_id).join("outcome.json");
         match read_no_follow(&path) {
             Ok(bytes) => Ok(Some(bytes)),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -84,10 +98,11 @@ impl WorkspaceFactory for DirWorkspaceFactory {
     fn record_memory(
         &self,
         work_id: &WorkId,
+        project_id: &ProjectId,
         status: WorkStatus,
         outcome_kind: OutcomeKind,
     ) -> Result<(), AppError> {
-        let path = self.dir(work_id).join("memory.log");
+        let path = self.dir(project_id, work_id).join("memory.log");
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(AppError::workspace)?;
         }
@@ -103,11 +118,13 @@ impl WorkspaceFactory for DirWorkspaceFactory {
     fn bind_attempt_control(
         &self,
         work_id: &WorkId,
+        project_id: &ProjectId,
         execution_id: &ExecutionId,
         attempt_id: &AttemptId,
     ) -> Result<PathBuf, AppError> {
         let path = self
             .control_root
+            .join(project_id.as_str())
             .join(work_id.as_str())
             .join(execution_id.as_str())
             .join(attempt_id.as_str());
@@ -128,9 +145,10 @@ impl WorkspaceFactory for DirWorkspaceFactory {
     fn record_operator_input(
         &self,
         work_id: &WorkId,
+        project_id: &ProjectId,
         input: &OperatorInput,
     ) -> Result<(), AppError> {
-        let directory = self.dir(work_id).join(".workengine");
+        let directory = self.dir(project_id, work_id).join(".workengine");
         reject_symlink(&directory, "operator-input directory")?;
         fs::create_dir_all(&directory).map_err(AppError::workspace)?;
         restrict_directory(&directory)?;
@@ -299,8 +317,10 @@ mod tests {
         id: &WorkId,
         checkout: Option<&Path>,
     ) -> Result<PathBuf, AppError> {
+        let project = ProjectId::default_project();
         factory.bind(&BindRequest {
             work_id: id,
+            project_id: &project,
             goal: "do the thing",
             checkout,
         })
@@ -318,15 +338,69 @@ mod tests {
         assert!(pa.starts_with(dir.path().join("workspaces")));
         assert!(pb.starts_with(dir.path().join("workspaces")));
         factory
-            .record_memory(&a, WorkStatus::Failed, OutcomeKind::Failed)
+            .record_memory(
+                &a,
+                &ProjectId::default_project(),
+                WorkStatus::Failed,
+                OutcomeKind::Failed,
+            )
             .unwrap();
         factory
-            .record_memory(&a, WorkStatus::Succeeded, OutcomeKind::Succeeded)
+            .record_memory(
+                &a,
+                &ProjectId::default_project(),
+                WorkStatus::Succeeded,
+                OutcomeKind::Succeeded,
+            )
             .unwrap();
         let memory = fs::read_to_string(pa.join("memory.log")).unwrap();
         let lines: Vec<_> = memory.lines().collect();
         assert_eq!(lines.len(), 2);
         assert!(!pb.join("memory.log").exists());
+    }
+
+    #[test]
+    fn projects_do_not_share_repository_roots_even_for_the_same_work_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let factory = DirWorkspaceFactory::new(dir.path());
+        let id = WorkId::parse("work-a").unwrap();
+        let project_a = ProjectId::parse("project-a").unwrap();
+        let project_b = ProjectId::parse("project-b").unwrap();
+        let a = factory
+            .bind(&BindRequest {
+                work_id: &id,
+                project_id: &project_a,
+                goal: "a",
+                checkout: None,
+            })
+            .unwrap();
+        let b = factory
+            .bind(&BindRequest {
+                work_id: &id,
+                project_id: &project_b,
+                goal: "b",
+                checkout: None,
+            })
+            .unwrap();
+        assert_ne!(a, b);
+        assert!(a.starts_with(dir.path().join("workspaces/project-a")));
+        assert!(b.starts_with(dir.path().join("workspaces/project-b")));
+    }
+
+    #[test]
+    fn default_project_reuses_a_legacy_unscoped_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let factory = DirWorkspaceFactory::new(dir.path());
+        let id = WorkId::parse("legacy").unwrap();
+        let legacy = dir.path().join("workspaces/legacy");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(legacy.join("kept.txt"), "kept").unwrap();
+        let rebound = bind(&factory, &id, None).unwrap();
+        assert_eq!(rebound, legacy);
+        assert_eq!(
+            fs::read_to_string(rebound.join("kept.txt")).unwrap(),
+            "kept"
+        );
     }
 
     #[test]
@@ -336,12 +410,27 @@ mod tests {
         let a = WorkId::parse("work-a").unwrap();
         bind(&factory, &a, None).unwrap();
         factory
-            .record_memory(&a, WorkStatus::Succeeded, OutcomeKind::Succeeded)
+            .record_memory(
+                &a,
+                &ProjectId::default_project(),
+                WorkStatus::Succeeded,
+                OutcomeKind::Succeeded,
+            )
             .unwrap();
         factory
-            .record_memory(&a, WorkStatus::Succeeded, OutcomeKind::Succeeded)
+            .record_memory(
+                &a,
+                &ProjectId::default_project(),
+                WorkStatus::Succeeded,
+                OutcomeKind::Succeeded,
+            )
             .unwrap();
-        let memory = fs::read_to_string(factory.dir(&a).join("memory.log")).unwrap();
+        let memory = fs::read_to_string(
+            factory
+                .dir(&ProjectId::default_project(), &a)
+                .join("memory.log"),
+        )
+        .unwrap();
         assert_eq!(memory.lines().count(), 1);
     }
 
@@ -428,12 +517,21 @@ mod tests {
         let root = bind(&factory, &id, None).unwrap();
 
         std::os::unix::fs::symlink(&outside, root.join("outcome.json")).unwrap();
-        assert!(factory.read_artifact(&id).is_err());
+        assert!(
+            factory
+                .read_artifact(&id, &ProjectId::default_project())
+                .is_err()
+        );
 
         std::os::unix::fs::symlink(&outside, root.join("memory.log")).unwrap();
         assert!(
             factory
-                .record_memory(&id, WorkStatus::Failed, OutcomeKind::Failed)
+                .record_memory(
+                    &id,
+                    &ProjectId::default_project(),
+                    WorkStatus::Failed,
+                    OutcomeKind::Failed,
+                )
                 .is_err()
         );
         assert_eq!(fs::read_to_string(&outside).unwrap(), "protected");
@@ -453,7 +551,11 @@ mod tests {
             body: "data".to_owned(),
             created_at_unix_ms: 1,
         };
-        assert!(factory.record_operator_input(&id, &input).is_err());
+        assert!(
+            factory
+                .record_operator_input(&id, &ProjectId::default_project(), &input)
+                .is_err()
+        );
     }
 
     #[test]
@@ -468,10 +570,18 @@ mod tests {
             body: "choose B".to_owned(),
             created_at_unix_ms: 42,
         };
-        factory.record_operator_input(&id, &input).unwrap();
-        factory.record_operator_input(&id, &input).unwrap();
-        let text =
-            fs::read_to_string(factory.dir(&id).join(".workengine/operator-inputs.jsonl")).unwrap();
+        factory
+            .record_operator_input(&id, &ProjectId::default_project(), &input)
+            .unwrap();
+        factory
+            .record_operator_input(&id, &ProjectId::default_project(), &input)
+            .unwrap();
+        let text = fs::read_to_string(
+            factory
+                .dir(&ProjectId::default_project(), &id)
+                .join(".workengine/operator-inputs.jsonl"),
+        )
+        .unwrap();
         assert_eq!(text.lines().count(), 1);
         let value: serde_json::Value = serde_json::from_str(text.trim()).unwrap();
         assert_eq!(value["workId"], "work-input");

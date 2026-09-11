@@ -1,21 +1,27 @@
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Duration;
 
 use workengine_domain::{
     AttemptId, ChannelPolicy, ConfirmedOutcome, ContentDigest, EXECUTION_SPEC_SCHEMA_VERSION,
-    ExecutionId, ExecutionSpec, OUTCOME_SCHEMA_VERSION, Outcome, OutcomeKind, RuntimeKind, Work,
-    WorkEvent, WorkId, WorkStatus,
+    ExecutionId, ExecutionSpec, OUTCOME_SCHEMA_VERSION, Outcome, OutcomeKind, ProjectId,
+    RuntimeKind, Work, WorkEvent, WorkId, WorkStatus,
 };
 
 use crate::clock::Clock;
 use crate::error::{AppError, ChannelReaction};
 use crate::ports::{
-    AttemptClaim, AttemptRecorder, BindRequest, ExecutionObservation, ProcessEvent, RunRequest,
-    SequencedEvent, StartRequest, WorkQuery, WorkStore, WorkerExit, WorkerRunner, WorkspaceFactory,
+    AttemptClaim, AttemptRecorder, BindRequest, ExecutionObservation, ExpectedContext,
+    InboundRecord, InboundSignal, InboundSource, InboundStore, MutationRequest, MutationResult,
+    ProcessEvent, Publication, PublicationKind, PublicationStore, Publisher, RemoteMutation,
+    RunRequest, SequencedEvent, StartRequest, WorkQuery, WorkStore, WorkerExit, WorkerRunner,
+    WorkspaceFactory,
 };
-use crate::{complete, create, next, park, recover_unconfirmed, start};
+use crate::{
+    complete, create, dispatch_publications, mutate_remote, next, park, poll_inbound,
+    recover_unconfirmed, start,
+};
 
 const BUDGET: Duration = Duration::from_secs(5);
 
@@ -34,6 +40,7 @@ struct FakeStore {
     works: HashMap<String, Work>,
     events: Vec<WorkEvent>,
     active: HashMap<String, (String, String)>,
+    inbound_receipts: HashSet<(String, String)>,
 }
 
 impl WorkQuery for FakeStore {
@@ -200,6 +207,25 @@ impl FakeStore {
     }
 }
 
+impl InboundStore for FakeStore {
+    fn put_inbound(
+        &mut self,
+        source_id: &str,
+        record_id: &str,
+        work: &Work,
+        event: WorkEvent,
+    ) -> Result<bool, AppError> {
+        if !self
+            .inbound_receipts
+            .insert((source_id.to_owned(), record_id.to_owned()))
+        {
+            return Ok(false);
+        }
+        self.put(work, event)?;
+        Ok(true)
+    }
+}
+
 #[derive(Default)]
 struct FakeWorkspace {
     artifacts: HashMap<String, Vec<u8>>,
@@ -215,13 +241,18 @@ impl WorkspaceFactory for FakeWorkspace {
         Ok(PathBuf::from(format!("/workspace/{}", request.work_id)))
     }
 
-    fn read_artifact(&self, work_id: &WorkId) -> Result<Option<Vec<u8>>, AppError> {
+    fn read_artifact(
+        &self,
+        work_id: &WorkId,
+        _project_id: &workengine_domain::ProjectId,
+    ) -> Result<Option<Vec<u8>>, AppError> {
         Ok(self.artifacts.get(work_id.as_str()).cloned())
     }
 
     fn record_memory(
         &self,
         work_id: &WorkId,
+        _project_id: &workengine_domain::ProjectId,
         status: WorkStatus,
         outcome_kind: OutcomeKind,
     ) -> Result<(), AppError> {
@@ -300,6 +331,7 @@ fn start_work_with(
             id,
             execution_spec: &spec,
             checkout: None,
+            capture: None,
         },
     )
 }
@@ -786,4 +818,174 @@ fn start_writes_the_goal_into_the_workspace_bind() {
             .map(String::as_str),
         Some("do the thing")
     );
+}
+
+struct FakeInbound {
+    records: Vec<InboundRecord>,
+}
+
+impl InboundSource for FakeInbound {
+    fn source_id(&self) -> &str {
+        "source-a"
+    }
+
+    fn poll(&mut self) -> Result<Vec<InboundRecord>, AppError> {
+        Ok(self.records.clone())
+    }
+}
+
+#[test]
+fn inbound_requires_explicit_ready_and_is_idempotent() {
+    let project = ProjectId::parse("project-a").unwrap();
+    let pending = InboundRecord {
+        record_id: "pending".to_owned(),
+        signal: InboundSignal::Pending,
+        project_id: project.clone(),
+        repository: Some("repo-a".to_owned()),
+        goal: "untrusted pending text".to_owned(),
+        worker_profile: "stub".to_owned(),
+        notification_target: Some("operator-a".to_owned()),
+    };
+    let ready = InboundRecord {
+        record_id: "ready".to_owned(),
+        signal: InboundSignal::Ready,
+        ..pending.clone()
+    };
+    let mut source = FakeInbound {
+        records: vec![pending, ready],
+    };
+    let mut store = FakeStore::default();
+    let clock = FakeClock { unix_ms: 10 };
+    let first = poll_inbound(&mut store, &mut source, &clock).unwrap();
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].status(), WorkStatus::Ready);
+    assert_eq!(first[0].attributes().project_id(), &project);
+    assert_eq!(
+        poll_inbound(&mut store, &mut source, &clock).unwrap().len(),
+        0
+    );
+    assert_eq!(store.works.len(), 1);
+}
+
+#[derive(Default)]
+struct FakePublicationStore {
+    pending: Vec<Publication>,
+    attempts: Vec<(i64, bool, Option<String>)>,
+}
+
+impl PublicationStore for FakePublicationStore {
+    fn pending_publications(&self, limit: usize) -> Result<Vec<Publication>, AppError> {
+        Ok(self.pending.iter().take(limit).cloned().collect())
+    }
+
+    fn record_publication_attempt(
+        &mut self,
+        publication_id: i64,
+        delivered: bool,
+        _attempted_at_unix_ms: u64,
+        error: Option<&str>,
+    ) -> Result<(), AppError> {
+        self.attempts
+            .push((publication_id, delivered, error.map(str::to_owned)));
+        Ok(())
+    }
+}
+
+struct FailingPublisher;
+
+impl Publisher for FailingPublisher {
+    fn publish(&mut self, _publication: &Publication) -> Result<(), AppError> {
+        Err(AppError::worker("channel unavailable"))
+    }
+}
+
+#[test]
+fn publisher_failure_is_recorded_best_effort_without_a_status_writer() {
+    let mut store = FakePublicationStore {
+        pending: vec![Publication {
+            publication_id: 1,
+            kind: PublicationKind::ExternalInputRequired,
+            work_id: WorkId::parse("work-a").unwrap(),
+            project_id: ProjectId::parse("project-a").unwrap(),
+            target: "operator-a".to_owned(),
+            status: WorkStatus::Parked,
+            created_at_unix_ms: 1,
+            attempt_count: 0,
+        }],
+        attempts: Vec::new(),
+    };
+    let delivered = dispatch_publications(
+        &mut store,
+        &mut FailingPublisher,
+        &FakeClock { unix_ms: 2 },
+        10,
+    )
+    .unwrap();
+    assert_eq!(delivered, 0);
+    assert_eq!(store.attempts.len(), 1);
+    assert!(!store.attempts[0].1);
+}
+
+#[derive(Default)]
+struct FakeRemote {
+    calls: usize,
+}
+
+impl RemoteMutation for FakeRemote {
+    fn compare_and_swap(&mut self, request: &MutationRequest) -> Result<MutationResult, AppError> {
+        self.calls += 1;
+        if request.expected.revision != "rev-1" {
+            return Err(AppError::Conflict("remote revision changed".to_owned()));
+        }
+        Ok(MutationResult {
+            revision: "rev-2".to_owned(),
+        })
+    }
+}
+
+#[test]
+fn remote_mutation_requires_matching_expected_context_and_cas() {
+    let work = Work::new(
+        WorkId::parse("work-a").unwrap(),
+        workengine_domain::WorkAttributes::scoped(
+            "goal",
+            "stub",
+            ProjectId::parse("project-a").unwrap(),
+            Some("repo-a".to_owned()),
+            None,
+        )
+        .unwrap(),
+        1,
+    )
+    .unwrap();
+    let mut remote = FakeRemote::default();
+    let mismatch = MutationRequest {
+        expected: ExpectedContext {
+            project_id: ProjectId::parse("project-b").unwrap(),
+            repository: "repo-a".to_owned(),
+            revision: "rev-1".to_owned(),
+        },
+        change_digest: "sha256:change".to_owned(),
+    };
+    assert!(matches!(
+        mutate_remote(&work, &mut remote, &mismatch),
+        Err(AppError::Conflict(_))
+    ));
+    assert_eq!(remote.calls, 0);
+
+    let matching = MutationRequest {
+        expected: ExpectedContext {
+            project_id: ProjectId::parse("project-a").unwrap(),
+            repository: "repo-a".to_owned(),
+            revision: "rev-1".to_owned(),
+        },
+        change_digest: "sha256:change".to_owned(),
+    };
+    assert_eq!(
+        mutate_remote(&work, &mut remote, &matching)
+            .unwrap()
+            .revision,
+        "rev-2"
+    );
+    assert_eq!(remote.calls, 1);
 }

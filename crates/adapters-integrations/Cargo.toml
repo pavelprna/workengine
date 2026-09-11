@@ -1,21 +1,21 @@
 [package]
-name = "workengine-adapters-store"
+name = "workengine-adapters-integrations"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
 rust-version.workspace = true
-description = "Workengine WorkStore adapters."
+description = "Workengine inbound and publication adapters."
 
 [dependencies]
 workengine-application.workspace = true
 workengine-domain.workspace = true
-rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-uuid.workspace = true
+nix.workspace = true
 
 [dev-dependencies]
+workengine-adapters-store.workspace = true
 tempfile.workspace = true
 
 [lints]

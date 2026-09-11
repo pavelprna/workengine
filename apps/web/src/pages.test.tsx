@@ -46,12 +46,20 @@ function response(body: unknown, status = 200) {
   });
 }
 
-function work(id: string, goal: string, status = "ready") {
+function work(
+  id: string,
+  goal: string,
+  status = "ready",
+  projectId = "default",
+  repository: string | null = null,
+) {
   return {
     workId: id,
     status,
     goal,
     workerProfile: "stub",
+    projectId,
+    repository,
     createdAtUnixMs: "1000",
     outcomeKind: null,
     workspaceBound: false,
@@ -73,17 +81,23 @@ beforeEach(() => {
     if (!rawUrl) throw new Error("The mocked request did not provide a URL");
     const url = new URL(rawUrl, "http://localhost/");
     const method = requestLike.method ?? init?.method ?? "GET";
+    let body: string | undefined;
+    if (method === "POST") {
+      if (typeof init?.body === "string") {
+        body = init.body;
+      } else if (typeof requestLike.body === "string") {
+        body = requestLike.body;
+      } else if (
+        "text" in requestLike &&
+        typeof requestLike.text === "function"
+      ) {
+        body = await requestLike.text();
+      }
+    }
     requests.push({
       method,
       url,
-      body:
-        method === "POST"
-          ? typeof init?.body === "string"
-            ? init.body
-            : typeof requestLike.body === "string"
-              ? requestLike.body
-              : undefined
-          : undefined,
+      body,
     });
     if (url.pathname === "/api/v0/health") {
       return response({
@@ -208,6 +222,18 @@ beforeEach(() => {
         ],
       });
     }
+    if (url.pathname === "/api/v0/works/work-detail/relations") {
+      return response([
+        {
+          fromWorkId: "work-blocker",
+          toWorkId: "work-detail",
+          kind: "blocks",
+        },
+      ]);
+    }
+    if (url.pathname.match(/^\/api\/v0\/works\/[^/]+\/relations$/)) {
+      return response([]);
+    }
     if (url.pathname === "/api/v0/works") {
       return response({
         items: [work("work-a", "alpha"), work("work-b", "bravo", "succeeded")],
@@ -265,7 +291,7 @@ test.serial(
     const router = createAppRouter();
     await router.navigate({
       to: "/works",
-      search: { profile: undefined, status: undefined },
+      search: { profile: undefined, project: undefined, status: undefined },
     });
     renderApp(router);
     await screen.findByText("alpha");
@@ -278,6 +304,14 @@ test.serial(
         ),
       ).toBe(true);
     });
+
+    await userEvent.type(screen.getByLabelText("Exact project"), "alpha");
+    await userEvent.click(screen.getByRole("button", { name: "Apply" }));
+    await waitFor(() => {
+      expect(
+        requests.some(({ url }) => url.searchParams.get("project") === "alpha"),
+      ).toBe(true);
+    });
   },
 );
 
@@ -285,17 +319,24 @@ test.serial("creating Work opens its durable detail record", async () => {
   const router = createAppRouter();
   await router.navigate({
     to: "/works",
-    search: { profile: undefined, status: undefined },
+    search: { profile: undefined, project: undefined, status: undefined },
   });
   renderApp(router);
   await screen.findByText("Put a task in the queue");
 
   await userEvent.type(screen.getByLabelText("Goal"), "created from browser");
+  await userEvent.clear(screen.getByLabelText("Project"));
+  await userEvent.type(screen.getByLabelText("Project"), "alpha");
+  await userEvent.type(screen.getByLabelText("Repository"), "repo-alpha");
   await userEvent.click(screen.getByRole("button", { name: "Add to queue" }));
 
   await screen.findByRole("heading", { name: "created from browser" });
   const request = requests.find(({ method }) => method === "POST");
   expect(request?.url.pathname).toBe("/api/v0/works");
+  expect(JSON.parse(request?.body ?? "{}")).toMatchObject({
+    projectId: "alpha",
+    repository: "repo-alpha",
+  });
 });
 
 test.serial("detail renders the chronological event timeline", async () => {
@@ -309,6 +350,8 @@ test.serial("detail renders the chronological event timeline", async () => {
   expect(screen.getByRole("heading", { name: "Event timeline" })).toBeTruthy();
   expect(screen.getByText(/event #1/)).toBeTruthy();
   expect(screen.getByText(/event #2/)).toBeTruthy();
+  expect(screen.getByText("default")).toBeTruthy();
+  expect(screen.getAllByText("not recorded")).toHaveLength(2);
 });
 
 test.serial("detail explains execution and links proof artifacts", async () => {
@@ -326,6 +369,8 @@ test.serial("detail explains execution and links proof artifacts", async () => {
   expect(
     screen.getByRole("link", { name: /Confirmed succeeded outcome/ }),
   ).toBeTruthy();
+  expect(screen.getByRole("heading", { name: "Relations" })).toBeTruthy();
+  expect(screen.getByText("blocks")).toBeTruthy();
 });
 
 test.serial(

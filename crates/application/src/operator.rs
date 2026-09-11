@@ -39,6 +39,6 @@ pub fn record_operator_input(
         return Err(AppError::Conflict(format!("Work {id} is not parked")));
     }
     let input = store.append_operator_input(id, kind, &body, clock.unix_ms())?;
-    workspaces.record_operator_input(id, &input)?;
+    workspaces.record_operator_input(id, work.attributes().project_id(), &input)?;
     Ok(input)
 }

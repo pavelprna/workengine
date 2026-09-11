@@ -6,6 +6,7 @@ members = [
   "crates/adapters-store",
   "crates/adapters-worker",
   "crates/adapters-workspace",
+  "crates/adapters-integrations",
   "crates/adapters-http",
   "crates/cli",
 ]
@@ -23,6 +24,7 @@ workengine-application = { path = "crates/application" }
 workengine-adapters-store = { path = "crates/adapters-store" }
 workengine-adapters-worker = { path = "crates/adapters-worker" }
 workengine-adapters-workspace = { path = "crates/adapters-workspace" }
+workengine-adapters-integrations = { path = "crates/adapters-integrations" }
 workengine-adapters-http = { path = "crates/adapters-http" }
 clap = { version = "4.6.6", default-features = false, features = ["std", "derive", "help", "usage", "error-context", "env"] }
 thiserror = "2.0.20"

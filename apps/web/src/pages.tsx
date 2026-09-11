@@ -16,6 +16,7 @@ import {
   FileJson,
   Filter,
   Fingerprint,
+  FolderGit2,
   Gauge,
   HeartPulse,
   ListFilter,
@@ -39,6 +40,7 @@ import {
   type Execution,
   type WorkEvent,
   type WorkFilters,
+  type WorkRelation,
   type WorkSnapshot,
   type WorkStatus,
   workStatuses,
@@ -116,9 +118,15 @@ function WorkRows({ works }: { works: WorkSnapshot[] }) {
               <span className="work-copy">
                 <strong>{work.goal}</strong>
                 <small>
-                  {work.workerProfile} ·{" "}
+                  {work.projectId} / {work.workerProfile} ·{" "}
                   <time dateTime={created.dateTime}>{created.label}</time>
                 </small>
+                {work.repository && (
+                  <small className="repository-readout">
+                    <FolderGit2 size={11} aria-hidden="true" />
+                    {work.repository}
+                  </small>
+                )}
               </span>
               <StatusBadge status={work.status} />
               <ArrowRight className="row-arrow" size={17} aria-hidden="true" />
@@ -158,11 +166,18 @@ function NewWorkForm() {
   const navigate = useNavigate();
   const [goal, setGoal] = useState("");
   const [profile, setProfile] = useState("stub");
+  const [project, setProject] = useState("default");
+  const [repository, setRepository] = useState("");
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     createWork.mutate(
-      { goal, workerProfile: profile },
+      {
+        goal,
+        workerProfile: profile,
+        projectId: project.trim() || "default",
+        repository: repository.trim() || null,
+      },
       {
         onSuccess: (work) => {
           void navigate({
@@ -201,6 +216,26 @@ function NewWorkForm() {
           onChange={(event) => setProfile(event.target.value)}
           required
         />
+        <div className="intake-context">
+          <div>
+            <label htmlFor="project">Project</label>
+            <input
+              id="project"
+              onChange={(event) => setProject(event.target.value)}
+              required
+              value={project}
+            />
+          </div>
+          <div>
+            <label htmlFor="repository">Repository</label>
+            <input
+              id="repository"
+              onChange={(event) => setRepository(event.target.value)}
+              placeholder="optional identity"
+              value={repository}
+            />
+          </div>
+        </div>
         {createWork.isError && (
           <p className="form-error" role="alert">
             {createWork.error.message}
@@ -228,7 +263,7 @@ export function OverviewPage() {
   return (
     <>
       <header className="page-header overview-header">
-        <p className="eyebrow">LOCAL CONTROL PLANE · v0.5</p>
+        <p className="eyebrow">LOCAL CONTROL PLANE</p>
         <h1>Every outcome has a trail.</h1>
         <p className="lede">
           Durable Work is the record. Follow every execution from immutable
@@ -288,7 +323,7 @@ export function OverviewPage() {
             <Link
               key={status}
               className={`status-count ${status}`}
-              search={{ profile: undefined, status }}
+              search={{ profile: undefined, project: undefined, status }}
               to="/works"
             >
               <span>{status}</span>
@@ -308,7 +343,11 @@ export function OverviewPage() {
           </div>
           <Link
             className="text-link"
-            search={{ profile: undefined, status: undefined }}
+            search={{
+              profile: undefined,
+              project: undefined,
+              status: undefined,
+            }}
             to="/works"
           >
             View queue <ArrowRight size={15} />
@@ -331,9 +370,11 @@ export function WorksPage() {
   const search = useSearch({ from: worksRoute.id });
   const navigate = useNavigate();
   const [profileInput, setProfileInput] = useState(search.profile ?? "");
+  const [projectInput, setProjectInput] = useState(search.project ?? "");
   const filters: WorkFilters = {
     status: search.status,
     profile: search.profile,
+    project: search.project,
   };
   const works = api.useWorks(filters);
   const items = works.data?.pages.flatMap((page) => page.items) ?? [];
@@ -341,13 +382,21 @@ export function WorksPage() {
   function setSearch(next: WorkFilters) {
     void navigate({
       to: "/works",
-      search: { profile: next.profile, status: next.status },
+      search: {
+        profile: next.profile,
+        project: next.project,
+        status: next.status,
+      },
     });
   }
 
   function applyProfile(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setSearch({ status: search.status, profile: profileInput || undefined });
+    setSearch({
+      status: search.status,
+      profile: profileInput || undefined,
+      project: projectInput || undefined,
+    });
   }
 
   return (
@@ -377,7 +426,12 @@ export function WorksPage() {
               <legend>Status</legend>
               <button
                 className={!search.status ? "selected" : ""}
-                onClick={() => setSearch({ profile: search.profile })}
+                onClick={() =>
+                  setSearch({
+                    project: search.project,
+                    profile: search.profile,
+                  })
+                }
                 type="button"
               >
                 all
@@ -386,7 +440,13 @@ export function WorksPage() {
                 <button
                   className={search.status === status ? "selected" : ""}
                   key={status}
-                  onClick={() => setSearch({ status, profile: search.profile })}
+                  onClick={() =>
+                    setSearch({
+                      status,
+                      project: search.project,
+                      profile: search.profile,
+                    })
+                  }
                   type="button"
                 >
                   {status}
@@ -406,6 +466,15 @@ export function WorksPage() {
               <button className="text-button" type="submit">
                 Apply
               </button>
+              <label htmlFor="project-filter">
+                <FolderGit2 size={14} /> Exact project
+              </label>
+              <input
+                id="project-filter"
+                onChange={(event) => setProjectInput(event.target.value)}
+                placeholder="all projects"
+                value={projectInput}
+              />
             </form>
           </div>
           {works.isPending && <p className="quiet">Reading the queue…</p>}
@@ -685,11 +754,61 @@ function ArtifactCatalogue({ artifacts }: { artifacts: Artifact[] }) {
   );
 }
 
+function RelationGraph({ relations }: { relations: WorkRelation[] }) {
+  if (relations.length === 0) {
+    return (
+      <section
+        className="content-panel relation-panel"
+        aria-labelledby="relations-title"
+      >
+        <div className="section-heading">
+          <div>
+            <p className="panel-kicker">PROJECT GRAPH</p>
+            <h2 id="relations-title">Relations</h2>
+          </div>
+          <span className="readout">NO EDGES</span>
+        </div>
+        <p className="quiet">
+          No parent, blocking, or follow-up relation touches this Work.
+        </p>
+      </section>
+    );
+  }
+  return (
+    <section
+      className="content-panel relation-panel"
+      aria-labelledby="relations-title"
+    >
+      <div className="section-heading">
+        <div>
+          <p className="panel-kicker">PROJECT GRAPH</p>
+          <h2 id="relations-title">Relations</h2>
+        </div>
+        <span className="readout">
+          {relations.length} EDGE{relations.length === 1 ? "" : "S"}
+        </span>
+      </div>
+      <ol className="relation-list">
+        {relations.map((relation) => (
+          <li
+            key={`${relation.fromWorkId}:${relation.kind}:${relation.toWorkId}`}
+          >
+            <code>{relation.fromWorkId}</code>
+            <span>{relation.kind.replaceAll("_", " ")}</span>
+            <code>{relation.toWorkId}</code>
+          </li>
+        ))}
+      </ol>
+    </section>
+  );
+}
+
 export function WorkDetailPage() {
   const { workId } = useParams({ from: workRoute.id });
   const work = api.useWork(workId);
   const events = api.useEvents(workId);
   const observation = api.useObservation(workId);
+  const relations = api.useRelations(workId);
   const startWork = api.useStartWork();
   const resumeWork = api.useResumeWork();
   const parkWork = api.useParkWork();
@@ -714,7 +833,7 @@ export function WorkDetailPage() {
     <>
       <Link
         className="back-link"
-        search={{ profile: undefined, status: undefined }}
+        search={{ profile: undefined, project: undefined, status: undefined }}
         to="/works"
       >
         ← Back to queue
@@ -840,6 +959,14 @@ export function WorkDetailPage() {
           <strong>{work.data.workerProfile}</strong>
         </div>
         <div>
+          <span>PROJECT</span>
+          <strong>{work.data.projectId}</strong>
+        </div>
+        <div>
+          <span>REPOSITORY</span>
+          <strong>{work.data.repository ?? "not recorded"}</strong>
+        </div>
+        <div>
           <span>CREATED</span>
           <time dateTime={created.dateTime}>{created.label}</time>
         </div>
@@ -852,6 +979,16 @@ export function WorkDetailPage() {
           <strong>{work.data.outcomeKind ?? "not confirmed"}</strong>
         </div>
       </section>
+      {relations.isPending && (
+        <p className="quiet observation-loading">Reading relation graph…</p>
+      )}
+      {relations.isError && (
+        <QueryError
+          message={relations.error.message}
+          retry={() => void relations.refetch()}
+        />
+      )}
+      {relations.data && <RelationGraph relations={relations.data} />}
       {observation.isPending && (
         <p className="quiet observation-loading">Reading execution proof…</p>
       )}
@@ -870,7 +1007,7 @@ export function WorkDetailPage() {
           >
             <div className="section-heading execution-section-heading">
               <div>
-                <p className="panel-kicker">COMPLETE OBSERVATION · v0.4</p>
+                <p className="panel-kicker">COMPLETE OBSERVATION</p>
                 <h2 id="execution-title">Execution ledger</h2>
               </div>
               <span className="readout">OLDEST FIRST</span>
@@ -1025,7 +1162,7 @@ export function NotFoundPage() {
       <h1>That record is not here.</h1>
       <Link
         className="primary-action"
-        search={{ profile: undefined, status: undefined }}
+        search={{ profile: undefined, project: undefined, status: undefined }}
         to="/works"
       >
         Return to queue

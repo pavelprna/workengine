@@ -1,8 +1,8 @@
 # Ports
 
-Ports are traits in `workengine-application`. Adapters implement them. The first
-vertical slice implements the runtime ports. Local inbound observation and the
-daemon-owned lifecycle are present; external inbound and publish wait.
+Ports are traits in `workengine-application`. Adapters implement them. Local
+observation, daemon-owned lifecycle, project queue, explicit-signal inbound,
+publication, quota, and remote mutation boundaries are present.
 
 Trait signatures below are intent, not frozen Rust. The crate is the API. Behaviour (`MUST` / `MUST NOT`) lives in `docs/spec/`. This file maps each port to adapters.
 
@@ -25,6 +25,15 @@ Persists current Work status and the append-only event log.
 | In-memory, then SQLite in a data directory | Postgres when more than one machine exists |
 
 Behaviour: [workflow.md](../spec/workflow.md) (persistence: atomic status+event, immutable events, replay, capture).
+
+## QueueStore, RelationStore, and QuotaStore
+
+`QueueStore` atomically selects eligible project-scoped Work and installs a
+generation-bound `CaptureLease`. `claim_attempt` consumes the exact capture;
+direct start is rejected while a capture exists. `RelationStore` persists the
+closed relation graph, and `QuotaStore` owns named capacity leases. Configured
+`queue:global` and `project:<id>` quotas are acquired with capture/start and
+released when Work leaves its active slot.
 
 ## WorkerRunner
 
@@ -69,7 +78,7 @@ uses the same `create` use case and is not an external source.
 
 | First adapter | Next |
 | --- | --- |
-| Localhost HTTP query/SSE observer, operator intake, and explicit start; CLI creates and starts Work | Any tracker behind the port |
+| Localhost HTTP query/SSE observer and operator intake; JSONL explicit-signal inbox | Any tracker behind the port |
 
 The domain does not mention a tracker. Adding a source is a new adapter crate or module, not a new entity. See [work.md](../spec/work.md) Source.
 
@@ -79,7 +88,7 @@ Best-effort effects visible outside Workengine (board, mail, chat).
 
 | First adapter | Next |
 | --- | --- |
-| No-op | Any channel behind the port |
+| Durable outbox plus payload-minimal JSONL publisher | Any channel behind the port |
 
 Behaviour: [workflow.md](../spec/workflow.md) Publication (best-effort; the Worker process does not publish).
 
@@ -88,6 +97,7 @@ Behaviour: [workflow.md](../spec/workflow.md) Publication (best-effort; the Work
 One use case per module, named after the CLI verb:
 
 - `create`
+- `capture`
 - `next`
 - `start`
 - `complete`
@@ -102,7 +112,10 @@ fresh attempt. Channel errors are classified by reaction: fail completes as
 re-spawns inside that `start` up to the snapshotted limit, then fails. Shared
 workspace outcome files remain rejected.
 
-Later: `capture`. Not a god-object orchestrator.
+Integration use cases poll one source or dispatch one publisher at a time.
+Adapters schedule those calls independently and never hold a store transaction
+while external code runs. `RemoteMutation` exposes compare-and-swap with an
+expected project/repository/revision context; it has no blind-write method.
 
 ## Adding an adapter
 

@@ -6,6 +6,7 @@ use std::time::Duration;
 use clap::{Parser, Subcommand};
 use sha2::{Digest, Sha256};
 use workengine_adapters_http::{LifecycleControl, LocalClient, serve};
+use workengine_adapters_integrations::{JsonLinesInbound, JsonLinesPublisher};
 use workengine_adapters_store::{SqliteObserver, SqliteStore};
 use workengine_adapters_worker::{
     ProcessWorkerRunner, StubBehavior, StubWorkerRunner, digest_rootfs, reclaim_owned_process,
@@ -13,11 +14,14 @@ use workengine_adapters_worker::{
 use workengine_adapters_workspace::DirWorkspaceFactory;
 use workengine_application::{
     AppError, AttemptState, ControlKind, OperatorInputKind, StartRequest, SystemClock, WorkQuery,
-    WorkerExit, create, next, record_operator_input, recover_unconfirmed, request_control, start,
+    WorkerExit, add_relation, capture, configure_quota, create_scoped, dispatch_publications, next,
+    poll_inbound, record_operator_input, recover_captures, recover_unconfirmed, release_capture,
+    request_control, start,
 };
 use workengine_domain::{
     ChannelPolicy, ContentDigest, DomainError, EXECUTION_SPEC_SCHEMA_VERSION, ExecutionSpec,
-    OutcomeKind, RuntimeKind, SecretRef, Work, WorkId, WorkStatus,
+    OutcomeKind, ProjectId, RelationKind, RuntimeKind, SecretRef, Work, WorkId, WorkRelation,
+    WorkStatus,
 };
 
 mod profile;
@@ -84,6 +88,42 @@ enum Command {
         /// Worker profile name (opaque configuration key)
         #[arg(long, default_value = "stub")]
         profile: String,
+        /// Isolated project queue
+        #[arg(long, default_value = "default")]
+        project: String,
+        /// Immutable repository identity for expected-context mutations
+        #[arg(long)]
+        repository: Option<String>,
+        /// Opaque publisher target for the intended operator
+        #[arg(long)]
+        notify: Option<String>,
+    },
+    /// Atomically capture and run one eligible Work
+    RunNext {
+        /// Queue consumer identity
+        #[arg(long)]
+        worker: String,
+        /// Limit capture to one isolated project
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// Add typed Work relation data inside one project
+    Relate {
+        #[arg(long)]
+        from: String,
+        #[arg(long)]
+        to: String,
+        #[arg(long)]
+        kind: String,
+    },
+    /// Create or CAS-update a centralized named quota
+    QuotaSet {
+        #[arg(long)]
+        resource: String,
+        #[arg(long)]
+        limit: u32,
+        #[arg(long)]
+        expected_generation: Option<u64>,
     },
     /// Print the next startable Work id
     Next,
@@ -111,6 +151,12 @@ enum Command {
         /// Localhost TCP port for the Web observer
         #[arg(long, default_value_t = DEFAULT_SERVE_PORT)]
         port: u16,
+        /// Poll an explicit-signal JSONL inbox as SOURCE=PATH (repeatable)
+        #[arg(long = "inbound")]
+        inbound: Vec<String>,
+        /// Deliver the best-effort publication outbox as JSONL
+        #[arg(long)]
+        publisher: Option<PathBuf>,
     },
     /// Bind a workspace, run a Worker, and complete
     Start {
@@ -179,14 +225,55 @@ fn run() -> anyhow::Result<u8> {
             println!("{}", digest_rootfs(&rootfs)?);
             Ok(0)
         }
-        Command::Create { goal, profile } => {
+        Command::Create {
+            goal,
+            profile,
+            project,
+            repository,
+            notify,
+        } => {
+            let project = ProjectId::parse(project)?;
             if cli.direct_control {
-                let work = launch_options.create(goal, profile)?;
+                let work = launch_options.create(goal, profile, project, repository, notify)?;
                 println!("{} {}", work.id(), work.status());
             } else {
-                let work = client.create(&goal, &profile)?;
+                let work = client.create(
+                    &goal,
+                    &profile,
+                    &project,
+                    repository.as_deref(),
+                    notify.as_deref(),
+                )?;
                 println!("{} {}", work.work_id, work.status);
             }
+            Ok(0)
+        }
+        Command::RunNext { worker, project } => {
+            let project = project.map(ProjectId::parse).transpose()?;
+            let work = client.run_next(project.as_ref(), &worker)?;
+            if let Some(work) = work {
+                println!("{} {}", work.work_id, work.status);
+                Ok(exit_for_status(work.status, work.outcome_kind))
+            } else {
+                Ok(0)
+            }
+        }
+        Command::Relate { from, to, kind } => {
+            let relation = WorkRelation::new(
+                WorkId::parse(from)?,
+                WorkId::parse(to)?,
+                kind.parse::<RelationKind>()?,
+            )?;
+            client.relate(&relation)?;
+            Ok(0)
+        }
+        Command::QuotaSet {
+            resource,
+            limit,
+            expected_generation,
+        } => {
+            let generation = client.configure_quota(&resource, limit, expected_generation)?;
+            println!("{resource} {generation}");
             Ok(0)
         }
         Command::Next => {
@@ -227,12 +314,18 @@ fn run() -> anyhow::Result<u8> {
             }
             Ok(0)
         }
-        Command::Serve { port } => {
+        Command::Serve {
+            port,
+            inbound,
+            publisher,
+        } => {
             let _daemon_lock = acquire_daemon_lock(&data_dir)?;
             let mut store = SqliteStore::open(&data_dir)?;
             reclaim_active_processes(&data_dir, &store)?;
+            recover_captures(&mut store)?;
             recover_unconfirmed(&mut store, &SystemClock)?;
             drop(store);
+            start_integration_jobs(&data_dir, inbound, publisher)?;
             let observer = SqliteObserver::open(&data_dir)?;
             let control = Arc::new(launch_options);
             serve(observer, control, port, version_line())?;
@@ -298,6 +391,61 @@ fn run() -> anyhow::Result<u8> {
     }
 }
 
+fn start_integration_jobs(
+    data_dir: &std::path::Path,
+    inbound: Vec<String>,
+    publisher: Option<PathBuf>,
+) -> Result<(), AppError> {
+    for specification in inbound {
+        let (source_id, path) = specification
+            .split_once('=')
+            .ok_or_else(|| AppError::Conflict("--inbound must use SOURCE=PATH".to_owned()))?;
+        let mut source = JsonLinesInbound::new(source_id, PathBuf::from(path))?;
+        let data_dir = data_dir.to_path_buf();
+        std::thread::spawn(move || {
+            let mut store = loop {
+                match SqliteStore::open(&data_dir) {
+                    Ok(store) => break store,
+                    Err(error) => {
+                        tracing::warn!(event = "inbound_store_open_failed", %error);
+                        std::thread::sleep(Duration::from_millis(250));
+                    }
+                }
+            };
+            loop {
+                match poll_inbound(&mut store, &mut source, &SystemClock) {
+                    Ok(_) => {}
+                    Err(error) => tracing::warn!(event = "inbound_poll_failed", %error),
+                }
+                std::thread::sleep(Duration::from_millis(250));
+            }
+        });
+    }
+    if let Some(path) = publisher {
+        let data_dir = data_dir.to_path_buf();
+        std::thread::spawn(move || {
+            let mut publisher = JsonLinesPublisher::new(path);
+            let mut store = loop {
+                match SqliteStore::open(&data_dir) {
+                    Ok(store) => break store,
+                    Err(error) => {
+                        tracing::warn!(event = "publisher_store_open_failed", %error);
+                        std::thread::sleep(Duration::from_millis(250));
+                    }
+                }
+            };
+            loop {
+                match dispatch_publications(&mut store, &mut publisher, &SystemClock, 100) {
+                    Ok(_) => {}
+                    Err(error) => tracing::warn!(event = "publication_dispatch_failed", %error),
+                }
+                std::thread::sleep(Duration::from_millis(250));
+            }
+        });
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 struct LaunchOptions {
     data_dir: PathBuf,
@@ -321,6 +469,15 @@ impl LaunchOptions {
     }
 
     fn start_with_checkout(&self, id: &WorkId, checkout: Option<PathBuf>) -> anyhow::Result<Work> {
+        self.start_with_capture(id, checkout, None)
+    }
+
+    fn start_with_capture(
+        &self,
+        id: &WorkId,
+        checkout: Option<PathBuf>,
+        capture_lease: Option<&workengine_application::CaptureLease>,
+    ) -> anyhow::Result<Work> {
         let mut store = open_store(&self.data_dir, false)?;
         let profile_name = store
             .get(id)?
@@ -351,18 +508,75 @@ impl LaunchOptions {
                 id,
                 execution_spec: &execution_spec,
                 checkout: selected.checkout.as_deref(),
+                capture: capture_lease,
             },
         )?)
     }
 }
 
 impl LifecycleControl for LaunchOptions {
-    fn create(&self, goal: String, profile: String) -> Result<Work, AppError> {
-        create(
+    fn create(
+        &self,
+        goal: String,
+        profile: String,
+        project_id: ProjectId,
+        repository: Option<String>,
+        notification_target: Option<String>,
+    ) -> Result<Work, AppError> {
+        create_scoped(
             &mut SqliteStore::open(&self.data_dir)?,
             &SystemClock,
             goal,
             profile,
+            project_id,
+            repository,
+            notification_target,
+        )
+    }
+
+    fn run_next(
+        &self,
+        project_id: Option<ProjectId>,
+        worker_id: String,
+    ) -> Result<Option<Work>, AppError> {
+        let mut store = SqliteStore::open(&self.data_dir)?;
+        let Some(lease) = capture(&mut store, &SystemClock, project_id.as_ref(), &worker_id)?
+        else {
+            return Ok(None);
+        };
+        drop(store);
+        match self.start_with_capture(lease.work.id(), None, Some(&lease)) {
+            Ok(work) => Ok(Some(work)),
+            Err(error) => {
+                let app_error = error
+                    .downcast::<AppError>()
+                    .unwrap_or_else(|error| AppError::worker(error.to_string()));
+                let mut store = SqliteStore::open(&self.data_dir)?;
+                if store.get(lease.work.id())?.is_some_and(|work| {
+                    matches!(work.status(), WorkStatus::Ready | WorkStatus::Parked)
+                }) {
+                    let _ = release_capture(&mut store, &lease);
+                }
+                Err(app_error)
+            }
+        }
+    }
+
+    fn relate(&self, relation: WorkRelation) -> Result<(), AppError> {
+        add_relation(&mut SqliteStore::open(&self.data_dir)?, &relation)
+    }
+
+    fn configure_quota(
+        &self,
+        resource: String,
+        limit: u32,
+        expected_generation: Option<u64>,
+    ) -> Result<u64, AppError> {
+        configure_quota(
+            &mut SqliteStore::open(&self.data_dir)?,
+            &resource,
+            limit,
+            expected_generation,
         )
     }
 
@@ -668,11 +882,22 @@ fn reclaim_active_processes(
                 .last()
                 .filter(|attempt| attempt.state == AttemptState::Active)
             {
-                let control_root = data_dir
+                let scoped_control_root = data_dir
+                    .join("control")
+                    .join(work.attributes().project_id().as_str())
+                    .join(work.id().as_str())
+                    .join(execution.execution_id.as_str())
+                    .join(attempt.attempt_id.as_str());
+                let legacy_control_root = data_dir
                     .join("control")
                     .join(work.id().as_str())
                     .join(execution.execution_id.as_str())
                     .join(attempt.attempt_id.as_str());
+                let control_root = if scoped_control_root.exists() {
+                    scoped_control_root
+                } else {
+                    legacy_control_root
+                };
                 reclaim_owned_process(
                     &control_root,
                     work.id().as_str(),
@@ -703,6 +928,8 @@ fn work_json(query: &impl WorkQuery, work: &workengine_domain::Work) -> serde_js
         "status": work.status().as_str(),
         "goal": work.attributes().goal(),
         "workerProfile": work.attributes().worker_profile(),
+        "projectId": work.attributes().project_id().as_str(),
+        "repository": work.attributes().repository(),
         "workspaceRoot": work.workspace_root(),
         "createdAtUnixMs": work.created_at_unix_ms(),
         "outcomeKind": outcome,
@@ -722,6 +949,8 @@ fn event_json(event: &workengine_application::SequencedEvent) -> serde_json::Val
         "to": record.to().as_str(),
         "goal": record.attributes().map(|attributes| attributes.goal()),
         "workerProfile": record.attributes().map(|attributes| attributes.worker_profile()),
+        "projectId": record.attributes().map(|attributes| attributes.project_id().as_str()),
+        "repository": record.attributes().and_then(|attributes| attributes.repository()),
         "outcomeKind": record.outcome_kind().map(|kind| kind.as_str()),
         "workspaceRoot": record.workspace_root(),
         "createdAtUnixMs": record.created_at_unix_ms(),

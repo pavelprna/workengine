@@ -35,6 +35,10 @@ export const worksRoute = createRoute({
       typeof search.profile === "string" && search.profile.length > 0
         ? search.profile
         : undefined,
+    project:
+      typeof search.project === "string" && search.project.length > 0
+        ? search.project
+        : undefined,
   }),
   component: WorksPage,
 });

@@ -17,6 +17,12 @@ pub enum DomainError {
     UnknownEventKind(String),
     #[error("invalid work id")]
     InvalidWorkId,
+    #[error("invalid project id")]
+    InvalidProjectId,
+    #[error("unknown Work relation kind {0:?}")]
+    UnknownRelationKind(String),
+    #[error("invalid Work relation")]
+    InvalidRelation,
     #[error("invalid execution id")]
     InvalidExecutionId,
     #[error("invalid attempt id")]

@@ -8,6 +8,8 @@ mod event;
 mod execution;
 mod execution_id;
 mod outcome;
+mod project_id;
+mod relation;
 mod status;
 mod work;
 mod work_id;
@@ -21,6 +23,8 @@ pub use execution::{
 };
 pub use execution_id::ExecutionId;
 pub use outcome::{OUTCOME_SCHEMA_VERSION, Outcome, OutcomeKind};
+pub use project_id::ProjectId;
+pub use relation::{RelationKind, WorkRelation};
 pub use status::WorkStatus;
 pub use work::{Apply, Work, WorkAttributes};
 pub use work_id::WorkId;

@@ -1125,6 +1125,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "workengine-adapters-integrations"
+version = "0.1.0"
+dependencies = [
+ "nix",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "workengine-adapters-store",
+ "workengine-application",
+ "workengine-domain",
+]
+
+[[package]]
 name = "workengine-adapters-store"
 version = "0.1.0"
 dependencies = [
@@ -1132,6 +1145,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "uuid",
  "workengine-application",
  "workengine-domain",
 ]
@@ -1185,6 +1199,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "workengine-adapters-http",
+ "workengine-adapters-integrations",
  "workengine-adapters-store",
  "workengine-adapters-worker",
  "workengine-adapters-workspace",

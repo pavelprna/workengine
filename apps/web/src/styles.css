@@ -405,6 +405,16 @@ h2 {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.work-copy .repository-readout {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  color: var(--muted);
+}
+.repository-readout svg {
+  flex: 0 0 auto;
+  color: var(--cyan);
+}
 .row-arrow {
   color: var(--quiet);
   margin-top: 0.06rem;
@@ -608,6 +618,15 @@ input::placeholder {
 .profile-filter input {
   padding: 0.42rem;
 }
+.intake-context {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.5rem;
+}
+.intake-context > div {
+  display: grid;
+  gap: 0.5rem;
+}
 textarea:focus,
 input:focus {
   border-color: var(--acid);
@@ -730,7 +749,7 @@ input:focus {
 }
 .fact-grid {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
   margin-bottom: var(--space-4);
   border-top: 1px solid var(--line);
   border-left: 1px solid var(--line);
@@ -1033,6 +1052,42 @@ input:focus {
 }
 .artifact-panel {
   margin-bottom: 1rem;
+}
+.relation-panel {
+  margin-bottom: 1rem;
+}
+.relation-list {
+  display: grid;
+  gap: 1px;
+  margin: 1rem 0 0;
+  padding: 0;
+  background: var(--line);
+  list-style: none;
+}
+.relation-list li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  gap: 0.65rem;
+  align-items: center;
+  padding: 0.75rem 0.8rem;
+  background: #11150f;
+}
+.relation-list code {
+  overflow: hidden;
+  color: var(--paper);
+  font-size: 0.61rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.relation-list code:last-child {
+  text-align: right;
+}
+.relation-list span {
+  border: 1px solid #778334;
+  color: var(--acid);
+  font-size: 0.55rem;
+  padding: 0.22rem 0.35rem;
+  text-transform: uppercase;
 }
 .artifact-list {
   display: grid;
@@ -1361,6 +1416,19 @@ input:focus {
   }
   .profile-filter label {
     grid-column: 1 / -1;
+  }
+  .intake-context {
+    grid-template-columns: 1fr;
+  }
+  .relation-list li {
+    grid-template-columns: 1fr;
+    gap: 0.45rem;
+  }
+  .relation-list span {
+    width: fit-content;
+  }
+  .relation-list code:last-child {
+    text-align: left;
   }
   .section-heading {
     align-items: flex-start;

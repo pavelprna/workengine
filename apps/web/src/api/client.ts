@@ -36,7 +36,10 @@ export type Diagnostic = components["schemas"]["Diagnostic"];
 export type WorkFilters = {
   status?: WorkStatus;
   profile?: string;
+  project?: string;
 };
+
+export type WorkRelation = components["schemas"]["WorkRelation"];
 
 function refreshWork(
   queryClient: ReturnType<typeof useQueryClient>,
@@ -78,6 +81,15 @@ async function getEvents(workId: string, after?: string) {
   });
   if (!data)
     throw new Error(errorMessage(error, "No response from the event log"));
+  return data;
+}
+
+async function getRelations(workId: string) {
+  const { data, error } = await client.GET("/api/v0/works/{workId}/relations", {
+    params: { path: { workId } },
+  });
+  if (!data)
+    throw new Error(errorMessage(error, "No response from the relation graph"));
   return data;
 }
 
@@ -127,6 +139,11 @@ export const api = {
       queryFn: ({ pageParam }) => getEvents(workId, pageParam),
       getNextPageParam: (page) => page.nextCursor ?? undefined,
     }),
+  useRelations: (workId: string) =>
+    useQuery({
+      queryKey: ["relations", workId],
+      queryFn: () => getRelations(workId),
+    }),
   useObservation: (workId: string) =>
     useQuery({
       queryKey: ["observation", workId],
@@ -146,7 +163,12 @@ export const api = {
   useCreateWork: () => {
     const queryClient = useQueryClient();
     return useMutation({
-      mutationFn: async (input: { goal: string; workerProfile: string }) => {
+      mutationFn: async (input: {
+        goal: string;
+        workerProfile: string;
+        projectId: string;
+        repository: string | null;
+      }) => {
         const { data, error } = await client.POST("/api/v0/works", {
           body: input,
         });

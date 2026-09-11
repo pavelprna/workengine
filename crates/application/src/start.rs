@@ -31,7 +31,10 @@ pub fn start(
             "execution spec does not belong to this Work and profile".to_owned(),
         ));
     }
-    if workspaces.read_artifact(id)?.is_some() {
+    if workspaces
+        .read_artifact(id, work.attributes().project_id())?
+        .is_some()
+    {
         return Err(AppError::outcome_schema(
             "shared workspace outcome artifacts are unsupported; a protected attempt artifact is required",
         ));
@@ -39,6 +42,7 @@ pub fn start(
 
     let root = workspaces.bind(&BindRequest {
         work_id: id,
+        project_id: work.attributes().project_id(),
         goal: work.attributes().goal(),
         checkout: request.checkout,
     })?;
@@ -73,7 +77,12 @@ pub fn start(
         (generated_execution_id()?, 0)
     };
     let mut attempt_id = generated_attempt_id()?;
-    let mut control_root = workspaces.bind_attempt_control(id, &execution_id, &attempt_id)?;
+    let mut control_root = workspaces.bind_attempt_control(
+        id,
+        work.attributes().project_id(),
+        &execution_id,
+        &attempt_id,
+    )?;
     let started_at = clock.unix_ms();
     store.claim_attempt(&AttemptClaim {
         execution_id: &execution_id,
@@ -82,6 +91,7 @@ pub fn start(
         work: &work,
         event: WorkEvent::started(&work, from, started_at),
         started_at_unix_ms: started_at,
+        capture: request.capture,
     })?;
 
     let budget = Duration::from_millis(request.execution_spec.wall_clock_budget_ms());
@@ -174,7 +184,12 @@ pub fn start(
                     clock.unix_ms(),
                 )?;
                 attempt_id = next_attempt_id;
-                control_root = workspaces.bind_attempt_control(id, &execution_id, &attempt_id)?;
+                control_root = workspaces.bind_attempt_control(
+                    id,
+                    work.attributes().project_id(),
+                    &execution_id,
+                    &attempt_id,
+                )?;
             }
             Err(AppError::Channel(
                 ChannelReaction::Retry | ChannelReaction::Fail | ChannelReaction::Park,
@@ -233,7 +248,12 @@ fn confirm(
         terminal_reason.unwrap_or_else(|| confirmed.outcome().kind().as_str()),
         control_request_id,
     )?;
-    workspaces.record_memory(work.id(), work.status(), confirmed.outcome().kind())?;
+    workspaces.record_memory(
+        work.id(),
+        work.attributes().project_id(),
+        work.status(),
+        confirmed.outcome().kind(),
+    )?;
     Ok(work.clone())
 }
 

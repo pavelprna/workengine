@@ -15,6 +15,7 @@
 | [0010](0010-observable-execution-projection.md) | Observable execution projection | Accepted |
 | [0011](0011-live-operator-daemon.md) | Local daemon owns lifecycle supervision | Accepted |
 | [0012](0012-deny-by-default-worker-policy.md) | Deny-by-default Worker policy and brokered egress | Accepted |
+| [0013](0013-project-queue-and-integration-boundaries.md) | Project-scoped queue and integration boundaries | Accepted |
 
 Status values: Proposed, Accepted, Superseded, Deprecated.
 

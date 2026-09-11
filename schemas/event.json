@@ -28,6 +28,9 @@
     },
     "goal": { "type": ["string", "null"] },
     "workerProfile": { "type": ["string", "null"] },
+    "projectId": { "type": ["string", "null"] },
+    "repository": { "type": ["string", "null"] },
+    "notificationTarget": { "type": ["string", "null"] },
     "outcomeKind": {
       "type": ["string", "null"],
       "enum": [

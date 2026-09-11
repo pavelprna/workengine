@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use workengine_domain::{
-    AttemptId, ConfirmedOutcome, ExecutionId, ExecutionSpec, Outcome, OutcomeKind, Work, WorkEvent,
-    WorkId, WorkStatus,
+    AttemptId, ConfirmedOutcome, ExecutionId, ExecutionSpec, Outcome, OutcomeKind, ProjectId, Work,
+    WorkEvent, WorkId, WorkRelation, WorkStatus,
 };
 
 use crate::error::AppError;
@@ -417,11 +417,173 @@ pub struct AttemptClaim<'a> {
     pub work: &'a Work,
     pub event: WorkEvent,
     pub started_at_unix_ms: u64,
+    /// Present only when a queue consumer starts Work through its exact capture.
+    pub capture: Option<&'a CaptureLease>,
+}
+
+/// Durable queue reservation. It is allocation state, never Work status.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CaptureLease {
+    pub capture_id: String,
+    pub work: Work,
+    pub worker_id: String,
+    pub generation: u64,
+    pub captured_at_unix_ms: u64,
+}
+
+pub struct CaptureRequest<'a> {
+    pub project_id: Option<&'a ProjectId>,
+    pub worker_id: &'a str,
+}
+
+/// Atomic queue allocation and project-local relation storage.
+pub trait QueueStore {
+    fn capture(
+        &mut self,
+        request: &CaptureRequest<'_>,
+        captured_at_unix_ms: u64,
+    ) -> Result<Option<CaptureLease>, AppError>;
+
+    fn release_capture(&mut self, lease: &CaptureLease) -> Result<(), AppError>;
+
+    fn reclaim_captures(&mut self) -> Result<usize, AppError>;
+}
+
+pub trait RelationStore {
+    fn add_relation(&mut self, relation: &WorkRelation) -> Result<(), AppError>;
+    fn relations(&self, work_id: &WorkId) -> Result<Vec<WorkRelation>, AppError>;
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QuotaLease {
+    pub lease_id: String,
+    pub resource: String,
+    pub holder: String,
+    pub units: u32,
+}
+
+/// Centralized named limits. The store owns the authoritative counters.
+pub trait QuotaStore {
+    fn configure_quota(
+        &mut self,
+        resource: &str,
+        limit: u32,
+        expected_generation: Option<u64>,
+    ) -> Result<u64, AppError>;
+
+    fn acquire_quota(
+        &mut self,
+        resource: &str,
+        holder: &str,
+        units: u32,
+    ) -> Result<QuotaLease, AppError>;
+
+    fn release_quota(&mut self, lease: &QuotaLease) -> Result<(), AppError>;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InboundSignal {
+    Pending,
+    Ready,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InboundRecord {
+    pub record_id: String,
+    pub signal: InboundSignal,
+    pub project_id: ProjectId,
+    pub repository: Option<String>,
+    pub goal: String,
+    pub worker_profile: String,
+    pub notification_target: Option<String>,
+}
+
+pub trait InboundSource {
+    fn source_id(&self) -> &str;
+    fn poll(&mut self) -> Result<Vec<InboundRecord>, AppError>;
+}
+
+/// Atomic Work creation plus durable external-record receipt.
+pub trait InboundStore: WorkStore {
+    fn put_inbound(
+        &mut self,
+        source_id: &str,
+        record_id: &str,
+        work: &Work,
+        event: WorkEvent,
+    ) -> Result<bool, AppError>;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PublicationKind {
+    WorkTransition,
+    ExternalInputRequired,
+}
+
+impl PublicationKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::WorkTransition => "work_transition",
+            Self::ExternalInputRequired => "external_input_required",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Publication {
+    pub publication_id: i64,
+    pub kind: PublicationKind,
+    pub work_id: WorkId,
+    pub project_id: ProjectId,
+    pub target: String,
+    pub status: WorkStatus,
+    pub created_at_unix_ms: u64,
+    pub attempt_count: u32,
+}
+
+pub trait PublicationStore {
+    fn pending_publications(&self, limit: usize) -> Result<Vec<Publication>, AppError>;
+    fn record_publication_attempt(
+        &mut self,
+        publication_id: i64,
+        delivered: bool,
+        attempted_at_unix_ms: u64,
+        error: Option<&str>,
+    ) -> Result<(), AppError>;
+}
+
+/// External effect only. It has no store/status method by construction.
+pub trait Publisher {
+    fn publish(&mut self, publication: &Publication) -> Result<(), AppError>;
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExpectedContext {
+    pub project_id: ProjectId,
+    pub repository: String,
+    pub revision: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MutationRequest {
+    pub expected: ExpectedContext,
+    pub change_digest: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MutationResult {
+    pub revision: String,
+}
+
+/// Remote writes expose compare-and-swap only; blind overwrite is absent.
+pub trait RemoteMutation {
+    fn compare_and_swap(&mut self, request: &MutationRequest) -> Result<MutationResult, AppError>;
 }
 
 /// How to bind the isolated directory for one Work.
 pub struct BindRequest<'a> {
     pub work_id: &'a WorkId,
+    pub project_id: &'a ProjectId,
     pub goal: &'a str,
     pub checkout: Option<&'a Path>,
 }
@@ -429,25 +591,32 @@ pub struct BindRequest<'a> {
 /// Isolated directory for the life of one Work.
 pub trait WorkspaceFactory {
     fn bind(&self, request: &BindRequest<'_>) -> Result<PathBuf, AppError>;
-    fn read_artifact(&self, work_id: &WorkId) -> Result<Option<Vec<u8>>, AppError>;
+    fn read_artifact(
+        &self,
+        work_id: &WorkId,
+        project_id: &ProjectId,
+    ) -> Result<Option<Vec<u8>>, AppError>;
     fn record_memory(
         &self,
         _work_id: &WorkId,
+        _project_id: &ProjectId,
         status: WorkStatus,
         outcome_kind: OutcomeKind,
     ) -> Result<(), AppError>;
     fn bind_attempt_control(
         &self,
         work_id: &WorkId,
+        project_id: &ProjectId,
         execution_id: &ExecutionId,
         attempt_id: &AttemptId,
     ) -> Result<PathBuf, AppError> {
-        let _ = (work_id, execution_id, attempt_id);
+        let _ = (work_id, project_id, execution_id, attempt_id);
         Ok(PathBuf::from("."))
     }
     fn record_operator_input(
         &self,
         _work_id: &WorkId,
+        _project_id: &ProjectId,
         input: &OperatorInput,
     ) -> Result<(), AppError> {
         let _ = input;
@@ -482,4 +651,5 @@ pub struct StartRequest<'a> {
     pub id: &'a WorkId,
     pub execution_spec: &'a ExecutionSpec,
     pub checkout: Option<&'a Path>,
+    pub capture: Option<&'a CaptureLease>,
 }

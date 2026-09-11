@@ -80,7 +80,7 @@ rules:
 ## Publication and observation
 
 - **[ENFORCED]** Effects visible outside Workengine MUST be performed by Workengine, not by the Worker process.
-- **[UNTESTED]** Publish adapters MUST be best-effort. A channel failure MUST NOT roll back the source of truth.
+- **[TESTED]** Publish adapters MUST be best-effort. A channel failure MUST NOT roll back the source of truth.
 - **[TESTED]** Any two observers MUST see the same snapshot of a given Work.
 - **[TESTED]** A subscription to the event stream MUST be resumable without loss and without duplicates. The cursor is exclusive, and `Last-Event-ID` takes precedence when both resume mechanisms are present.
 - **[TESTED]** A Work summary MUST be structured. Operators MUST NOT have to parse raw logs to know status.
@@ -90,8 +90,8 @@ rules:
 
 ## Operator park notifications
 
-- **[UNTESTED]** Parking caused by external input MUST be accompanied by a targeted notification.
-- **[UNTESTED]** That notification is a publish-port concern. It MUST NOT write status itself.
+- **[TESTED]** Parking caused by external input MUST be accompanied by a targeted notification.
+- **[ENFORCED]** That notification is a publish-port concern. It MUST NOT write status itself.
 
 ## Configuration
 
@@ -103,16 +103,16 @@ rules:
 
 These are not the first vertical slice. They remain invariants of the product.
 
-- **[UNTESTED]** Several Workers MAY drain a queue only through a capture protocol that excludes conflicting writers.
-- **[UNTESTED]** Workengine MUST serve several independent codebases without shared Work state between them.
-- **[UNTESTED]** A shared external resource with a quota MUST be accounted centrally, not locally by each instance.
-- **[UNTESTED]** Slowdown of one external dependency MUST NOT block work against others.
+- **[TESTED]** Several Workers MAY drain a queue only through a capture protocol that excludes conflicting writers.
+- **[TESTED]** Workengine MUST serve several independent codebases without shared Work state between them.
+- **[TESTED]** A shared external resource with a quota MUST be accounted centrally, not locally by each instance.
+- **[TESTED]** Slowdown of one external dependency MUST NOT block work against others.
 
 ## Infrastructure mutations
 
-- **[UNTESTED]** Remote mutations (for example git compare-and-swap) MUST use compare-and-swap semantics, not blind overwrite.
-- **[UNTESTED]** Mutating a codebase MUST happen only in an explicitly expected context. A mismatch MUST stop the operation.
-- **[TESTED]** Secrets that appear in logs or external output MUST be scrubbed before publication. The current process boundary publishes payload-free event counts only; no publisher adapter exists yet.
+- **[ENFORCED]** Remote mutations (for example git compare-and-swap) MUST use compare-and-swap semantics, not blind overwrite.
+- **[TESTED]** Mutating a codebase MUST happen only in an explicitly expected context. A mismatch MUST stop the operation.
+- **[TESTED]** Secrets that appear in logs or external output MUST be scrubbed before publication. Publisher records contain only bounded control-plane identity, target, status, kind, and time fields.
 
 ## Truth in code
 

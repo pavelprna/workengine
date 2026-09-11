@@ -21,7 +21,9 @@ use workengine_application::{
     SequencedEvent, WorkQuery,
 };
 use workengine_domain::OutcomeKind;
-use workengine_domain::{AttemptId, ExecutionId, Work, WorkEvent, WorkId, WorkStatus};
+use workengine_domain::{
+    AttemptId, ExecutionId, ProjectId, Work, WorkEvent, WorkId, WorkRelation, WorkStatus,
+};
 
 include!(concat!(env!("OUT_DIR"), "/web_assets.rs"));
 
@@ -59,11 +61,79 @@ impl LocalClient {
         Self { port }
     }
 
-    pub fn create(&self, goal: &str, profile: &str) -> Result<ClientWork, AppError> {
+    pub fn create(
+        &self,
+        goal: &str,
+        profile: &str,
+        project_id: &ProjectId,
+        repository: Option<&str>,
+        notification_target: Option<&str>,
+    ) -> Result<ClientWork, AppError> {
         self.post(
             "/api/v0/works",
-            &serde_json::json!({"goal": goal, "workerProfile": profile}),
+            &serde_json::json!({
+                "goal": goal,
+                "workerProfile": profile,
+                "projectId": project_id.as_str(),
+                "repository": repository,
+                "notificationTarget": notification_target,
+            }),
         )
+    }
+
+    pub fn run_next(
+        &self,
+        project_id: Option<&ProjectId>,
+        worker_id: &str,
+    ) -> Result<Option<ClientWork>, AppError> {
+        self.post_optional(
+            "/api/v0/queue/capture",
+            &serde_json::json!({
+                "projectId": project_id.map(ProjectId::as_str),
+                "workerId": worker_id,
+            }),
+        )
+    }
+
+    pub fn relate(&self, relation: &WorkRelation) -> Result<(), AppError> {
+        let response = self.send_post(
+            "/api/v0/relations",
+            &serde_json::to_vec(&serde_json::json!({
+                "fromWorkId": relation.from().as_str(),
+                "toWorkId": relation.to().as_str(),
+                "kind": relation.kind().as_str(),
+            }))
+            .map_err(AppError::store)?,
+        )?;
+        let (status, body) = decode_response_parts(&response)?;
+        ensure_success(status, body)?;
+        Ok(())
+    }
+
+    pub fn configure_quota(
+        &self,
+        resource: &str,
+        limit: u32,
+        expected_generation: Option<u64>,
+    ) -> Result<u64, AppError> {
+        let response = self.send_post(
+            "/api/v0/quotas",
+            &serde_json::to_vec(&serde_json::json!({
+                "resource": resource,
+                "limit": limit,
+                "expectedGeneration": expected_generation.map(|value| value.to_string()),
+            }))
+            .map_err(AppError::store)?,
+        )?;
+        let (status, body) = decode_response_parts(&response)?;
+        ensure_success(status, body)?;
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct QuotaResponse {
+            generation: String,
+        }
+        let response: QuotaResponse = serde_json::from_slice(body).map_err(AppError::store)?;
+        response.generation.parse().map_err(AppError::store)
     }
 
     pub fn start(&self, id: &WorkId) -> Result<ClientWork, AppError> {
@@ -100,7 +170,21 @@ impl LocalClient {
     }
 
     fn post(&self, path: &str, body: &serde_json::Value) -> Result<ClientWork, AppError> {
+        self.post_optional(path, body)?
+            .ok_or_else(|| AppError::store("daemon returned no Work"))
+    }
+
+    fn post_optional(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<Option<ClientWork>, AppError> {
         let body = serde_json::to_vec(body).map_err(AppError::store)?;
+        let response = self.send_post(path, &body)?;
+        decode_client_response(&response)
+    }
+
+    fn send_post(&self, path: &str, body: &[u8]) -> Result<Vec<u8>, AppError> {
         let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, self.port)).map_err(|error| {
             AppError::Conflict(format!(
                 "local daemon is unavailable on port {}: {error}",
@@ -116,15 +200,15 @@ impl LocalClient {
                 )
                 .as_bytes(),
             )
-            .and_then(|()| stream.write_all(&body))
+            .and_then(|()| stream.write_all(body))
             .map_err(AppError::store)?;
         let mut response = Vec::new();
         stream.read_to_end(&mut response).map_err(AppError::store)?;
-        decode_client_response(&response)
+        Ok(response)
     }
 }
 
-fn decode_client_response(response: &[u8]) -> Result<ClientWork, AppError> {
+fn decode_response_parts(response: &[u8]) -> Result<(u16, &[u8]), AppError> {
     let split = response
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
@@ -136,7 +220,10 @@ fn decode_client_response(response: &[u8]) -> Result<ClientWork, AppError> {
         .and_then(|line| line.split_whitespace().nth(1))
         .and_then(|value| value.parse::<u16>().ok())
         .ok_or_else(|| AppError::store("daemon returned an invalid HTTP status"))?;
-    let body = &response[split + 4..];
+    Ok((status, &response[split + 4..]))
+}
+
+fn ensure_success(status: u16, body: &[u8]) -> Result<(), AppError> {
     if !(200..300).contains(&status) {
         let error: ClientErrorResponse = serde_json::from_slice(body).map_err(AppError::store)?;
         return Err(match status {
@@ -145,12 +232,21 @@ fn decode_client_response(response: &[u8]) -> Result<ClientWork, AppError> {
             _ => AppError::store(error.message),
         });
     }
+    Ok(())
+}
+
+fn decode_client_response(response: &[u8]) -> Result<Option<ClientWork>, AppError> {
+    let (status, body) = decode_response_parts(response)?;
+    if status == 204 {
+        return Ok(None);
+    }
+    ensure_success(status, body)?;
     let response: ClientWorkResponse = serde_json::from_slice(body).map_err(AppError::store)?;
-    Ok(ClientWork {
+    Ok(Some(ClientWork {
         work_id: WorkId::parse(response.work_id)?,
         status: response.status.parse()?,
         outcome_kind: response.outcome_kind.map(|kind| kind.parse()).transpose()?,
-    })
+    }))
 }
 
 #[derive(Clone)]
@@ -162,7 +258,26 @@ struct ObserverState {
 
 /// Local lifecycle writer supplied by the CLI composition root.
 pub trait LifecycleControl: Send + Sync + 'static {
-    fn create(&self, goal: String, profile: String) -> Result<Work, AppError>;
+    fn create(
+        &self,
+        goal: String,
+        profile: String,
+        project_id: ProjectId,
+        repository: Option<String>,
+        notification_target: Option<String>,
+    ) -> Result<Work, AppError>;
+    fn run_next(
+        &self,
+        project_id: Option<ProjectId>,
+        worker_id: String,
+    ) -> Result<Option<Work>, AppError>;
+    fn relate(&self, relation: WorkRelation) -> Result<(), AppError>;
+    fn configure_quota(
+        &self,
+        resource: String,
+        limit: u32,
+        expected_generation: Option<u64>,
+    ) -> Result<u64, AppError>;
     fn start(&self, id: &WorkId) -> Result<Work, AppError>;
     fn resume(&self, id: &WorkId) -> Result<Work, AppError>;
     fn park(&self, id: &WorkId) -> Result<Work, AppError>;
@@ -207,7 +322,14 @@ fn router(state: ObserverState) -> Router {
         .route("/api/v0/health", get(health))
         .route("/api/v0/overview", get(overview))
         .route("/api/v0/works", get(list_works).post(create_work))
+        .route("/api/v0/queue/capture", post(run_next_work))
+        .route("/api/v0/relations", post(relate_work))
+        .route("/api/v0/quotas", post(configure_quota))
         .route("/api/v0/works/{work_id}", get(show_work))
+        .route(
+            "/api/v0/works/{work_id}/relations",
+            get(list_work_relations),
+        )
         .route("/api/v0/works/{work_id}/start", post(start_work))
         .route("/api/v0/works/{work_id}/resume", post(resume_work))
         .route("/api/v0/works/{work_id}/park", post(park_work))
@@ -274,9 +396,19 @@ struct WorkResponse {
     status: &'static str,
     goal: String,
     worker_profile: String,
+    project_id: String,
+    repository: Option<String>,
     created_at_unix_ms: String,
     outcome_kind: Option<&'static str>,
     workspace_bound: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkRelationResponse {
+    from_work_id: String,
+    to_work_id: String,
+    kind: &'static str,
 }
 
 #[derive(Serialize)]
@@ -406,6 +538,7 @@ struct Page<T> {
 struct WorksParams {
     status: Option<String>,
     profile: Option<String>,
+    project: Option<String>,
     cursor: Option<String>,
     limit: Option<usize>,
 }
@@ -415,6 +548,37 @@ struct WorksParams {
 struct CreateWorkRequest {
     goal: String,
     worker_profile: Option<String>,
+    project_id: Option<String>,
+    repository: Option<String>,
+    notification_target: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RunNextRequest {
+    project_id: Option<String>,
+    worker_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RelationRequest {
+    from_work_id: String,
+    to_work_id: String,
+    kind: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct QuotaRequest {
+    resource: String,
+    limit: u32,
+    expected_generation: Option<String>,
+}
+
+#[derive(Serialize)]
+struct QuotaResponse {
+    generation: String,
 }
 
 #[derive(Deserialize)]
@@ -479,12 +643,78 @@ async fn create_work(
         control.create(
             request.goal,
             request.worker_profile.unwrap_or_else(|| "stub".to_owned()),
+            request
+                .project_id
+                .map(ProjectId::parse)
+                .transpose()?
+                .unwrap_or_else(ProjectId::default_project),
+            request.repository,
+            request.notification_target,
         )
     })
     .await
     .map_err(|error| ApiError::internal(format!("create task failed: {error}")))?
     .map_err(ApiError::from_create)?;
     Ok((StatusCode::CREATED, Json(work_response(&state, &work)?)))
+}
+
+async fn run_next_work(
+    State(state): State<ObserverState>,
+    Json(request): Json<RunNextRequest>,
+) -> Result<Response, ApiError> {
+    let project_id = request
+        .project_id
+        .map(ProjectId::parse)
+        .transpose()
+        .map_err(ApiError::bad_request)?;
+    let control = state.control.clone();
+    let work = tokio::task::spawn_blocking(move || control.run_next(project_id, request.worker_id))
+        .await
+        .map_err(|error| ApiError::internal(format!("capture task failed: {error}")))?
+        .map_err(ApiError::from_start)?;
+    match work {
+        Some(work) => Ok(Json(work_response(&state, &work)?).into_response()),
+        None => Ok(StatusCode::NO_CONTENT.into_response()),
+    }
+}
+
+async fn relate_work(
+    State(state): State<ObserverState>,
+    Json(request): Json<RelationRequest>,
+) -> Result<StatusCode, ApiError> {
+    let relation = WorkRelation::new(
+        WorkId::parse(request.from_work_id).map_err(ApiError::bad_request)?,
+        WorkId::parse(request.to_work_id).map_err(ApiError::bad_request)?,
+        request.kind.parse().map_err(ApiError::bad_request)?,
+    )
+    .map_err(ApiError::bad_request)?;
+    let control = state.control.clone();
+    tokio::task::spawn_blocking(move || control.relate(relation))
+        .await
+        .map_err(|error| ApiError::internal(format!("relation task failed: {error}")))?
+        .map_err(ApiError::from_start)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn configure_quota(
+    State(state): State<ObserverState>,
+    Json(request): Json<QuotaRequest>,
+) -> Result<Json<QuotaResponse>, ApiError> {
+    let expected_generation = request
+        .expected_generation
+        .map(|value| value.parse())
+        .transpose()
+        .map_err(ApiError::bad_request)?;
+    let control = state.control.clone();
+    let generation = tokio::task::spawn_blocking(move || {
+        control.configure_quota(request.resource, request.limit, expected_generation)
+    })
+    .await
+    .map_err(|error| ApiError::internal(format!("quota task failed: {error}")))?
+    .map_err(ApiError::from_start)?;
+    Ok(Json(QuotaResponse {
+        generation: generation.to_string(),
+    }))
 }
 
 async fn list_works(
@@ -505,6 +735,10 @@ async fn list_works(
                 .profile
                 .as_deref()
                 .is_none_or(|profile| work.attributes().worker_profile() == profile)
+            && params
+                .project
+                .as_deref()
+                .is_none_or(|project| work.attributes().project_id().as_str() == project)
     });
     works.sort_by(|left, right| {
         right
@@ -533,6 +767,28 @@ async fn show_work(
     let work = with_query(&state, |query| query.get(&id))?
         .ok_or_else(|| ApiError::not_found("Work was not found"))?;
     Ok(Json(work_response(&state, &work)?))
+}
+
+async fn list_work_relations(
+    State(state): State<ObserverState>,
+    Path(work_id): Path<String>,
+) -> Result<Json<Vec<WorkRelationResponse>>, ApiError> {
+    let id = WorkId::parse(work_id).map_err(ApiError::bad_request)?;
+    let exists = with_query(&state, |query| query.get(&id))?.is_some();
+    if !exists {
+        return Err(ApiError::not_found("Work was not found"));
+    }
+    let relations = with_query(&state, |query| query.relations(&id))?;
+    Ok(Json(
+        relations
+            .into_iter()
+            .map(|relation| WorkRelationResponse {
+                from_work_id: relation.from().as_str().to_owned(),
+                to_work_id: relation.to().as_str().to_owned(),
+                kind: relation.kind().as_str(),
+            })
+            .collect(),
+    ))
 }
 
 async fn start_work(
@@ -825,6 +1081,8 @@ fn work_response(state: &ObserverState, work: &Work) -> Result<WorkResponse, Api
         status: work.status().as_str(),
         goal: work.attributes().goal().to_owned(),
         worker_profile: work.attributes().worker_profile().to_owned(),
+        project_id: work.attributes().project_id().to_string(),
+        repository: work.attributes().repository().map(str::to_owned),
         created_at_unix_ms: work.created_at_unix_ms().to_string(),
         outcome_kind: outcome_kind.map(|kind| kind.as_str()),
         workspace_bound: work.workspace_root().is_some(),
@@ -1195,12 +1453,14 @@ mod tests {
     use serde_json::Value;
     use tower::ServiceExt;
     use workengine_adapters_store::SqliteStore;
-    use workengine_application::{AttemptClaim, AttemptRecorder, SystemClock, WorkStore, create};
+    use workengine_application::{
+        AttemptClaim, AttemptRecorder, RelationStore, SystemClock, WorkStore, create, create_scoped,
+    };
     use workengine_domain::{
         AttemptId, CONFIRMED_OUTCOME_SCHEMA_VERSION, ChannelPolicy, ConfirmedOutcome,
         ContentDigest, EXECUTION_SPEC_SCHEMA_VERSION, ExecutionId, ExecutionSpec,
-        OUTCOME_SCHEMA_VERSION, Outcome, OutcomeKind, RuntimeKind, SecretRef, SecretSource, Work,
-        WorkAttributes, WorkEvent, WorkId, WorkStatus,
+        OUTCOME_SCHEMA_VERSION, Outcome, OutcomeKind, RelationKind, RuntimeKind, SecretRef,
+        SecretSource, Work, WorkAttributes, WorkEvent, WorkId, WorkRelation, WorkStatus,
     };
 
     use super::*;
@@ -1208,13 +1468,44 @@ mod tests {
     struct TestControl(PathBuf);
 
     impl LifecycleControl for TestControl {
-        fn create(&self, goal: String, profile: String) -> Result<Work, AppError> {
-            create(
+        fn create(
+            &self,
+            goal: String,
+            profile: String,
+            project_id: ProjectId,
+            repository: Option<String>,
+            notification_target: Option<String>,
+        ) -> Result<Work, AppError> {
+            create_scoped(
                 &mut SqliteStore::open(&self.0)?,
                 &SystemClock,
                 goal,
                 profile,
+                project_id,
+                repository,
+                notification_target,
             )
+        }
+
+        fn run_next(
+            &self,
+            _project_id: Option<ProjectId>,
+            _worker_id: String,
+        ) -> Result<Option<Work>, AppError> {
+            Ok(None)
+        }
+
+        fn relate(&self, _relation: WorkRelation) -> Result<(), AppError> {
+            Ok(())
+        }
+
+        fn configure_quota(
+            &self,
+            _resource: String,
+            _limit: u32,
+            _expected_generation: Option<u64>,
+        ) -> Result<u64, AppError> {
+            Ok(0)
         }
 
         fn start(&self, id: &WorkId) -> Result<Work, AppError> {
@@ -1438,6 +1729,7 @@ mod tests {
             .unwrap();
         let first = json(first).await;
         assert_eq!(first["items"][0]["workId"], "work-c");
+        assert_eq!(first["items"][0]["projectId"], "default");
         assert_eq!(first["nextCursor"], "20:work-c");
 
         let second = app
@@ -1465,6 +1757,55 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
         }
+    }
+
+    #[tokio::test]
+    async fn work_relations_are_read_only_and_project_graph_ready() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = SqliteStore::open(directory.path()).unwrap();
+        let blocker = ready_work("work-blocker", "hold the line", "stub", 10);
+        let dependent = ready_work("work-dependent", "wait for blocker", "stub", 11);
+        store.put(&blocker, WorkEvent::created(&blocker)).unwrap();
+        store
+            .put(&dependent, WorkEvent::created(&dependent))
+            .unwrap();
+        store
+            .add_relation(
+                &WorkRelation::new(
+                    blocker.id().clone(),
+                    dependent.id().clone(),
+                    RelationKind::Blocks,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        drop(store);
+
+        let app = router(observer_state(directory.path()));
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get("/api/v0/works/work-dependent/relations")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let relations = json(response).await;
+        assert_eq!(relations[0]["fromWorkId"], "work-blocker");
+        assert_eq!(relations[0]["toWorkId"], "work-dependent");
+        assert_eq!(relations[0]["kind"], "blocks");
+
+        let missing = app
+            .oneshot(
+                Request::get("/api/v0/works/unknown/relations")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -1609,6 +1950,7 @@ mod tests {
                 work: &running,
                 event: WorkEvent::started(&running, WorkStatus::Ready, 11),
                 started_at_unix_ms: 11,
+                capture: None,
             })
             .unwrap();
         store

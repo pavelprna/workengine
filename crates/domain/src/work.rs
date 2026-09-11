@@ -1,5 +1,6 @@
 use crate::error::DomainError;
 use crate::outcome::Outcome;
+use crate::project_id::ProjectId;
 use crate::status::WorkStatus;
 use crate::work_id::WorkId;
 
@@ -15,6 +16,9 @@ pub enum Apply {
 pub struct WorkAttributes {
     goal: String,
     worker_profile: String,
+    project_id: ProjectId,
+    repository: Option<String>,
+    notification_target: Option<String>,
 }
 
 impl WorkAttributes {
@@ -27,9 +31,44 @@ impl WorkAttributes {
         if goal.is_empty() || worker_profile.is_empty() {
             return Err(DomainError::InvalidAttributes);
         }
+        Self::scoped(
+            goal,
+            worker_profile,
+            ProjectId::default_project(),
+            None,
+            None,
+        )
+    }
+
+    pub fn scoped(
+        goal: impl Into<String>,
+        worker_profile: impl Into<String>,
+        project_id: ProjectId,
+        repository: Option<String>,
+        notification_target: Option<String>,
+    ) -> Result<Self, DomainError> {
+        let goal = goal.into();
+        let worker_profile = worker_profile.into();
+        let valid_optional = |value: &Option<String>| {
+            value.as_ref().is_none_or(|value| {
+                !value.trim().is_empty()
+                    && value.len() <= 512
+                    && !value.chars().any(char::is_control)
+            })
+        };
+        if goal.is_empty()
+            || worker_profile.is_empty()
+            || !valid_optional(&repository)
+            || !valid_optional(&notification_target)
+        {
+            return Err(DomainError::InvalidAttributes);
+        }
         Ok(Self {
             goal,
             worker_profile,
+            project_id,
+            repository,
+            notification_target,
         })
     }
 
@@ -39,6 +78,18 @@ impl WorkAttributes {
 
     pub fn worker_profile(&self) -> &str {
         &self.worker_profile
+    }
+
+    pub fn project_id(&self) -> &ProjectId {
+        &self.project_id
+    }
+
+    pub fn repository(&self) -> Option<&str> {
+        self.repository.as_deref()
+    }
+
+    pub fn notification_target(&self) -> Option<&str> {
+        self.notification_target.as_deref()
     }
 }
 

@@ -13,9 +13,9 @@ This document is the canonical behaviour of Work. Keywords follow [RFC 2119](htt
 ## Source
 
 - **[TESTED]** Work MAY originate from the local CLI or from the localhost Web intake through its inbound adapter. External inbound sources remain later work.
-- **[TESTED]** Local creation through the CLI or Web intake MUST persist Work as `ready` and MUST NOT spawn a Worker. Web intake accepts only a goal and an optional Worker profile name.
+- **[TESTED]** Local creation through the CLI or Web intake MUST persist Work as `ready` and MUST NOT spawn a Worker. Web intake accepts a goal and optional Worker profile, project identity, and immutable repository identity; it cannot set status or workspace data.
 - **[TESTED]** The domain MUST NOT name, import, or branch on a concrete inbound product.
-- **[UNTESTED]** A record in an external source MUST NOT become Work until an explicit signal exists: a ready state of that record, or an explicit operator command.
+- **[TESTED]** A record in an external source MUST NOT become Work until an explicit signal exists: a ready state of that record, or an explicit operator command.
 
 Local creation is an intentional product capability, not a temporary substitute
 for a required remote source. Future external inbound adapters add ways to
@@ -46,12 +46,13 @@ The first runtime slice statuses are this closed set. They are lifecycle names, 
 - **[TESTED]** A Work MUST carry a set of attributes that describe its content (what to do, which workspace root, which Worker profile).
 - **[TESTED]** The first-slice attributes MUST be a goal string and a Worker profile name. The profile name is an opaque configuration key, not a vendor branch in the domain.
 - **[TESTED]** Attribute names that identify a vendor or tracker product MUST NOT appear in the domain model.
-- **[ENFORCED]** The first slice MUST NOT require a Work relation graph. Relations remain allowed later; they are not needed to run `create` / `next` / `start`.
+- **[TESTED]** Local Work without an explicit project MUST belong to the reserved `default` project. Project and repository identity are immutable Work attributes used for queue and workspace isolation.
 
 ## Relations
 
-- **[UNTESTED]** Work MAY relate to other Work so that a graph can be built (parent/child, blocks, follows).
-- **[UNTESTED]** Relations MUST be data on Work, not implicit conversation between Workers.
+- **[TESTED]** Work MAY relate to other Work so that a graph can be built (parent/child, blocks, follows).
+- **[TESTED]** Relations MUST be data on Work, not implicit conversation between Workers.
+- **[TESTED]** Relations MUST NOT cross project boundaries. An unsucceeded `blocks` source makes its target ineligible for queue capture.
 
 ## Writer
 

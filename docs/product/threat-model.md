@@ -48,7 +48,9 @@ Short model for a control plane that spawns processes, holds workspace copies, a
 | Tracker column treated as status | Internal store is SoT; boards are best-effort copies |
 | Workengine phones home | No default telemetry exporter |
 | Destructive host actions | Deny-by-default Worker profile; known-destructive actions forbidden |
-| Two local clients double-start the same Work | One daemon owns supervisors and the store claims one active attempt transactionally; multi-host capture remains later work |
+| Two queue consumers double-start the same Work | One daemon owns supervisors; a generation-CAS capture lease is consumed by the matching attempt claim, and direct start cannot bypass it |
+| External source or publisher becomes authoritative | Explicit ready signals create internal Work through an idempotent receipt; publication reads a durable outbox and cannot write status |
+| Remote repository changed since inspection | Mutation requires expected project, repository, and revision context and uses compare-and-swap only |
 
 ## Out of scope for this note
 

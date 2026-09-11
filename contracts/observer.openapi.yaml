@@ -30,11 +30,48 @@ paths:
       parameters:
         - { name: status, in: query, schema: { type: string, enum: [ready, running, succeeded, failed, parked] } }
         - { name: profile, in: query, schema: { type: string } }
+        - { name: project, in: query, schema: { type: string } }
         - { name: cursor, in: query, description: Opaque, exclusive cursor for the newest-first order., schema: { type: string } }
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 50 } }
       responses:
         '200': { description: Work page ordered newest-first, content: { application/json: { schema: { $ref: '#/components/schemas/WorkPage' } } } }
         '400': { $ref: '#/components/responses/BadRequest' }
+  /api/v0/queue/capture:
+    post:
+      operationId: captureAndRunWork
+      description: Atomically capture one eligible Work for a queue consumer, consume that exact generation-protected lease while claiming an attempt, and return after the run is confirmed.
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { $ref: '#/components/schemas/RunNextRequest' } }
+      responses:
+        '200': { description: Confirmed terminal or parked Work snapshot, content: { application/json: { schema: { $ref: '#/components/schemas/WorkSnapshot' } } } }
+        '204': { description: No eligible Work in the requested project queue }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/v0/relations:
+    post:
+      operationId: addWorkRelation
+      description: Add an idempotent, same-project relation between two Work items.
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { $ref: '#/components/schemas/RelationRequest' } }
+      responses:
+        '204': { description: Relation recorded }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/v0/quotas:
+    post:
+      operationId: configureQuota
+      description: Create or compare-and-swap a centralized named quota.
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { $ref: '#/components/schemas/QuotaRequest' } }
+      responses:
+        '200': { description: New quota generation, content: { application/json: { schema: { $ref: '#/components/schemas/QuotaResponse' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { $ref: '#/components/responses/Conflict' }
   /api/v0/works/{workId}:
     get:
       operationId: getWork
@@ -42,6 +79,16 @@ paths:
         - { name: workId, in: path, required: true, schema: { type: string } }
       responses:
         '200': { description: Work snapshot, content: { application/json: { schema: { $ref: '#/components/schemas/WorkSnapshot' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/v0/works/{workId}/relations:
+    get:
+      operationId: listWorkRelations
+      description: Read the typed relations that touch one Work. This observation route never changes Work or queue eligibility.
+      parameters:
+        - { name: workId, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Typed relation data ordered deterministically, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/WorkRelation' } } } } }
         '400': { $ref: '#/components/responses/BadRequest' }
         '404': { $ref: '#/components/responses/NotFound' }
   /api/v0/works/{workId}/start:
@@ -183,6 +230,38 @@ components:
       properties:
         goal: { type: string, minLength: 1 }
         workerProfile: { type: string, default: stub }
+        projectId: { type: string }
+        repository: { type: [string, 'null'] }
+        notificationTarget: { type: [string, 'null'] }
+    RunNextRequest:
+      type: object
+      required: [workerId]
+      additionalProperties: false
+      properties:
+        projectId: { type: [string, 'null'] }
+        workerId: { type: string, minLength: 1 }
+    RelationRequest:
+      type: object
+      required: [fromWorkId, toWorkId, kind]
+      additionalProperties: false
+      properties:
+        fromWorkId: { type: string }
+        toWorkId: { type: string }
+        kind: { type: string, enum: [parent_child, blocks, follows] }
+    QuotaRequest:
+      type: object
+      required: [resource, limit]
+      additionalProperties: false
+      properties:
+        resource: { type: string, minLength: 1 }
+        limit: { type: integer, minimum: 1 }
+        expectedGeneration: { type: [string, 'null'], pattern: '^[0-9]+$' }
+    QuotaResponse:
+      type: object
+      required: [generation]
+      additionalProperties: false
+      properties:
+        generation: { type: string, pattern: '^[0-9]+$' }
     AnswerRequest:
       type: object
       required: [answer]
@@ -218,12 +297,14 @@ components:
             parked: { type: integer, minimum: 0 }
     WorkSnapshot:
       type: object
-      required: [workId, status, goal, workerProfile, createdAtUnixMs, workspaceBound]
+      required: [workId, status, goal, workerProfile, projectId, repository, createdAtUnixMs, workspaceBound]
       properties:
         workId: { type: string }
         status: { type: string, enum: [ready, running, succeeded, failed, parked] }
         goal: { type: string }
         workerProfile: { type: string }
+        projectId: { type: string }
+        repository: { type: [string, 'null'] }
         createdAtUnixMs: { type: string, pattern: '^[0-9]+$' }
         outcomeKind: { type: [string, 'null'] }
         workspaceBound: { type: boolean }
@@ -233,6 +314,13 @@ components:
       properties:
         items: { type: array, items: { $ref: '#/components/schemas/WorkSnapshot' } }
         nextCursor: { type: [string, 'null'] }
+    WorkRelation:
+      type: object
+      required: [fromWorkId, toWorkId, kind]
+      properties:
+        fromWorkId: { type: string }
+        toWorkId: { type: string }
+        kind: { type: string, enum: [parent_child, blocks, follows] }
     Event:
       type: object
       required: [cursor, workId, kind, to, createdAtUnixMs]

@@ -52,7 +52,7 @@ Four nouns. Everything else is an adapter.
 
 | Noun | Role |
 | --- | --- |
-| **Work** | A durable job: stable id, a goal, a Worker profile, and a status |
+| **Work** | A durable project-scoped job: stable id, repository context, goal, Worker profile, relations, and status |
 | **Worker** | An agent as a process. Workengine spawns it, watches the budget, and reads the outcome |
 | **Workspace** | A private copy for the life of one Work. Memory is append-only, and only after a confirmed outcome |
 | **Workflow** | The state machine. Transitions are code. Resume is idempotent. One writer |
@@ -78,7 +78,10 @@ Agent and tracker names stay in configuration and adapters, not in the core.
 
 | Command | What it does |
 | --- | --- |
-| `create --goal "<text>" [--profile stub]` | Persist a new Work as `ready` |
+| `create --goal "<text>" [--profile stub] [--project default] [--repository <identity>] [--notify <target>]` | Persist project-scoped Work as `ready` |
+| `run-next --worker <consumer> [--project <id>]` | Atomically capture and run one eligible Work |
+| `relate --from <id> --to <id> --kind <parent_child|blocks|follows>` | Record a typed, same-project Work relation |
+| `quota-set --resource <name> --limit <n> [--expected-generation <n>]` | Configure centralized capacity with optional CAS |
 | `next` | Print the next startable Work id |
 | `start --work <id>` | Ask the daemon to bind, run, and confirm Work |
 | `resume --work <id>` | Continue parked Work under the same execution |
@@ -87,7 +90,7 @@ Agent and tracker names stay in configuration and adapters, not in the core.
 | `answer --work <id> --answer "<text>"` | Record an answer and resume the same Work |
 | `consent --work <id> --action "<text>"` | Record explicit consent and resume the same Work |
 | `digest-rootfs --rootfs <path>` | Calculate a Bubblewrap runtime tree digest |
-| `serve [--port 9410]` | Run the localhost daemon, Web operator, and observer |
+| `serve [--port 9410] [--inbound <source=path>]... [--publisher <path>]` | Run the localhost daemon, Web operator, observer, and configured integration jobs |
 | `version` | Print `workengine <semver>` |
 
 `--data-dir` (or `WORKENGINE_DATA_DIR`) chooses the SQLite store and workspace
@@ -152,6 +155,23 @@ must speak to the explicitly mounted Unix broker socket named by
 `WORKENGINE_EGRESS_SOCKET`. A broken profile does not block Work that uses a
 different one.
 
+## Queue and integrations
+
+Every Work belongs to an isolated project (`default` when omitted). Queue
+consumers use `run-next`, which installs a generation-CAS capture before an
+attempt is claimed. Parent/child, blocks, and follows relations are typed data;
+an unfinished blocker makes its dependent Work ineligible. Named capacity is
+kept in the SQLite control plane, including optional `queue:global` and
+`project:<id>` limits.
+
+The integration adapter crate provides an explicit-signal JSONL inbox and a
+payload-minimal JSONL publisher. Inbound `(source, record)` receipts are
+idempotent. Publications come from a durable outbox after the status/event
+transaction; a channel failure cannot roll back Work. External-input parks
+enqueue a notification to the Work's `--notify` target. Source and publisher
+jobs use independent store connections, so one slow adapter does not hold the
+queue transaction.
+
 ## What this is not
 
 Workengine is not an agent, not an LLM supervisor, and not a tracker client.
@@ -164,8 +184,9 @@ Workengine is not an agent, not an LLM supervisor, and not a tracker client.
 ## Status
 
 Workengine is pre-1.0. What you can do today is the local live-operator slice
-above. Inbound adapters and publishers come later. The exact released version is
-reported by `workengine version` and by the Git tag.
+above. Project queues and product-neutral inbound/publisher adapters are
+present. The exact released version is reported by `workengine version` and by
+the Git tag.
 
 Public contracts — command names, exit codes, schemas — live in
 [compatibility.md](docs/product/compatibility.md). Behaviour lives in

@@ -81,6 +81,12 @@ These are not SemVer surfaces and not architecture. Canon for commits is `CONTRI
 | F38 | Runtime roots/images are digest-verified; user Workers have finite resources, mandatory seccomp, no capabilities, and no direct network | profile and Worker adapter tests | enforced |
 | F39 | Worker-writable control artifacts and Workengine store/workspace files are opened without following symlinks | store, Worker, and workspace adapter tests | enforced |
 | F40 | Untrusted goal/input/output/artifact text is data and cannot select a Work transition; observable child output remains payload-free | application, Worker, HTTP, and CLI tests | enforced |
+| F41 | Queue capture is generation-CAS protected, excludes a second consumer, and a captured attempt must consume the exact lease | application, store, and CLI tests | enforced |
+| F42 | Work, relations, queue selection, and workspace roots are project-scoped; blocking relations are deterministic data | domain, store, and workspace tests | enforced |
+| F43 | Named shared quotas are acquired and released atomically in the control-plane store | store tests | enforced |
+| F44 | Inbound records require an explicit ready signal and durable idempotency receipt | application, store, and integration-adapter tests | enforced |
+| F45 | Publications are best-effort outbox effects; external-input park notifications are targeted and never write status | application, store, and integration-adapter tests | enforced |
+| F46 | Remote mutations require expected project/repository/revision context and expose only compare-and-swap | application tests | enforced |
 
 ## How to add a check
 

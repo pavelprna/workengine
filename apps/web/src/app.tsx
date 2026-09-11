@@ -49,7 +49,11 @@ export function AppShell() {
           </Link>
           <Link
             activeProps={{ className: "active" }}
-            search={{ profile: undefined, status: undefined }}
+            search={{
+              profile: undefined,
+              project: undefined,
+              status: undefined,
+            }}
             to="/works"
           >
             <ListTodo size={17} /> Work queue

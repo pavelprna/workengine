@@ -18,6 +18,7 @@ workengine-adapters-store.workspace = true
 workengine-adapters-worker.workspace = true
 workengine-adapters-workspace.workspace = true
 workengine-adapters-http.workspace = true
+workengine-adapters-integrations.workspace = true
 clap.workspace = true
 anyhow.workspace = true
 tracing.workspace = true

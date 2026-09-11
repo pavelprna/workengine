@@ -364,6 +364,249 @@ fn cli_mutations_are_clients_of_the_daemon_api() {
 }
 
 #[test]
+fn daemon_capture_runs_one_work_from_the_selected_project() {
+    let Some(port) = reserve_port() else { return };
+    let directory = tempfile::tempdir().unwrap();
+    let mut server = bin()
+        .args([
+            "--data-dir",
+            directory.path().to_str().unwrap(),
+            "serve",
+            "--port",
+            &port.to_string(),
+        ])
+        .spawn()
+        .unwrap();
+    wait_for_http(
+        port,
+        b"GET /api/v0/health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    for project in ["project-a", "project-b"] {
+        let created = daemon_client(port)
+            .args([
+                "create",
+                "--goal",
+                project,
+                "--project",
+                project,
+                "--repository",
+                &format!("repo:{project}"),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            created.status.success(),
+            "create: {}",
+            String::from_utf8_lossy(&created.stderr)
+        );
+    }
+    let run = daemon_client(port)
+        .args([
+            "run-next",
+            "--worker",
+            "consumer-a",
+            "--project",
+            "project-a",
+        ])
+        .output()
+        .unwrap();
+    let _ = server.kill();
+    let _ = server.wait();
+    assert!(
+        run.status.success(),
+        "run-next: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert!(stdout(&run).ends_with(" succeeded"));
+    let connection =
+        rusqlite::Connection::open(directory.path().join("workengine.sqlite")).unwrap();
+    let project_a: String = connection
+        .query_row(
+            "SELECT status FROM works WHERE project_id = 'project-a'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let project_b: String = connection
+        .query_row(
+            "SELECT status FROM works WHERE project_id = 'project-b'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(project_a, "succeeded");
+    assert_eq!(project_b, "ready");
+}
+
+#[test]
+fn daemon_records_relations_and_configures_quotas_with_cas() {
+    let Some(port) = reserve_port() else { return };
+    let directory = tempfile::tempdir().unwrap();
+    let mut server = bin()
+        .args([
+            "--data-dir",
+            directory.path().to_str().unwrap(),
+            "serve",
+            "--port",
+            &port.to_string(),
+        ])
+        .spawn()
+        .unwrap();
+    wait_for_http(
+        port,
+        b"GET /api/v0/health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    let mut ids = Vec::new();
+    for goal in ["blocker", "dependent"] {
+        let created = daemon_client(port)
+            .args(["create", "--goal", goal, "--project", "project-a"])
+            .output()
+            .unwrap();
+        assert!(
+            created.status.success(),
+            "create: {}",
+            String::from_utf8_lossy(&created.stderr)
+        );
+        ids.push(
+            stdout(&created)
+                .split_whitespace()
+                .next()
+                .unwrap()
+                .to_owned(),
+        );
+    }
+    let related = daemon_client(port)
+        .args([
+            "relate", "--from", &ids[0], "--to", &ids[1], "--kind", "blocks",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        related.status.success(),
+        "relate: {}",
+        String::from_utf8_lossy(&related.stderr)
+    );
+
+    let created_quota = daemon_client(port)
+        .args([
+            "quota-set",
+            "--resource",
+            "project:project-a",
+            "--limit",
+            "1",
+        ])
+        .output()
+        .unwrap();
+    assert!(created_quota.status.success());
+    assert_eq!(stdout(&created_quota), "project:project-a 0");
+    let updated_quota = daemon_client(port)
+        .args([
+            "quota-set",
+            "--resource",
+            "project:project-a",
+            "--limit",
+            "2",
+            "--expected-generation",
+            "0",
+        ])
+        .output()
+        .unwrap();
+    assert!(updated_quota.status.success());
+    assert_eq!(stdout(&updated_quota), "project:project-a 1");
+    let stale_quota = daemon_client(port)
+        .args([
+            "quota-set",
+            "--resource",
+            "project:project-a",
+            "--limit",
+            "3",
+            "--expected-generation",
+            "0",
+        ])
+        .output()
+        .unwrap();
+    let _ = server.kill();
+    let _ = server.wait();
+    assert_eq!(stale_quota.status.code(), Some(11));
+
+    let connection =
+        rusqlite::Connection::open(directory.path().join("workengine.sqlite")).unwrap();
+    let relation_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM work_relations WHERE from_work_id = ?1 AND to_work_id = ?2 AND kind = 'blocks'",
+            [&ids[0], &ids[1]],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(relation_count, 1);
+    let (limit, generation): (i64, i64) = connection
+        .query_row(
+            "SELECT unit_limit, generation FROM quota_limits WHERE resource = 'project:project-a'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((limit, generation), (2, 1));
+}
+
+#[test]
+fn serve_polls_explicit_inbound_and_dispatches_publications_independently() {
+    let Some(port) = reserve_port() else { return };
+    let directory = tempfile::tempdir().unwrap();
+    let inbox = directory.path().join("inbox.jsonl");
+    let published = directory.path().join("published.jsonl");
+    std::fs::write(
+        &inbox,
+        "{\"recordId\":\"record-1\",\"signal\":\"ready\",\"projectId\":\"project-a\",\"repository\":\"repo-a\",\"goal\":\"external data\",\"workerProfile\":\"stub\",\"notificationTarget\":\"operator-a\"}\n",
+    )
+    .unwrap();
+    let inbound = format!("source-a={}", inbox.display());
+    let mut server = bin()
+        .args([
+            "--data-dir",
+            directory.path().to_str().unwrap(),
+            "serve",
+            "--port",
+            &port.to_string(),
+            "--inbound",
+            &inbound,
+            "--publisher",
+            published.to_str().unwrap(),
+        ])
+        .spawn()
+        .unwrap();
+    wait_for_http(
+        port,
+        b"GET /api/v0/health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut observed = None;
+    while Instant::now() < deadline {
+        if let Ok(text) = std::fs::read_to_string(&published)
+            && text.contains("operator-a")
+        {
+            observed = Some(text);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let _ = server.kill();
+    let _ = server.wait();
+    let text = observed.expect("inbound Work publication was not delivered");
+    assert!(text.contains("project-a"));
+    let connection =
+        rusqlite::Connection::open(directory.path().join("workengine.sqlite")).unwrap();
+    let count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM works WHERE project_id = 'project-a'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 1);
+}
+
+#[test]
 fn one_data_directory_has_one_daemon_owner() {
     let Some(first_port) = reserve_port() else {
         return;
@@ -534,6 +777,7 @@ fn daemon_restart_reclaims_the_owned_process_group_and_lease() {
         directory
             .path()
             .join("control")
+            .join("default")
             .join(&id)
             .join(execution)
             .join(attempt)
