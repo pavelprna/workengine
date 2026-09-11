@@ -70,6 +70,7 @@ These are not SemVer surfaces and not architecture. Canon for commits is `CONTRI
 | F27 | Tokio is confined to the HTTP adapter; domain and application stay synchronous | CLI architecture test | enforced |
 | F28 | Local HTTP intake can create only `ready` Work through the application use case; it cannot set status or workspace data | HTTP integration test | enforced |
 | F29 | HTTP overview is calculated from one read-only snapshot; resumable event cursors are exclusive and `Last-Event-ID` wins over query input | HTTP integration test | enforced |
+| F30 | Execution and attempt ids are distinct types; execution specs are immutable, contain references rather than secret values, and confirmed outcomes bind both ids | domain types and unit tests | enforced |
 
 ## How to add a check
 

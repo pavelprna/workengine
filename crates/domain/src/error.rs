@@ -17,6 +17,14 @@ pub enum DomainError {
     UnknownEventKind(String),
     #[error("invalid work id")]
     InvalidWorkId,
+    #[error("invalid execution id")]
+    InvalidExecutionId,
+    #[error("invalid attempt id")]
+    InvalidAttemptId,
+    #[error("invalid execution spec")]
+    InvalidExecutionSpec,
+    #[error("invalid confirmed outcome")]
+    InvalidConfirmedOutcome,
     #[error("invalid work attributes")]
     InvalidAttributes,
     #[error("unsupported schema version {0}")]

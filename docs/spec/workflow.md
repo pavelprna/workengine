@@ -61,6 +61,21 @@ control-plane operation, not a user command. Their rules:
 - **[TESTED]** On Workengine restart, Work in an unconfirmed state MUST return to the queue automatically (resume from the failure point, not from the beginning of the Work).
 - **[TESTED]** An unconfirmed `running` Work is parked by recovery. There is no `running` → `ready` transition. A workspace directory is not a trusted checkpoint or outcome authority.
 
+## Execution identity and provenance
+
+- **[TESTED]** Logical executions and Worker process attempts MUST use distinct,
+  opaque domain identity types: `ExecutionId` and `AttemptId`.
+- **[UNTESTED]** Every Worker process spawn within one execution MUST receive a
+  fresh `AttemptId`; retries and resumes MUST retain the same `ExecutionId`.
+- **[TESTED]** An execution MUST have one immutable `ExecutionSpec` containing
+  its Work id, Worker profile, Worker configuration digest, sandbox/runtime
+  digest, wall-clock budget, retry limit, channel policy, and secret references.
+  It MUST contain secret references, never secret values.
+- **[TESTED]** A confirmed outcome MUST bind the closed Worker outcome to its
+  Work, execution, and attempt identities.
+- **[UNTESTED]** Only the matching active attempt lease MAY confirm an outcome.
+  A stale, foreign, or unproven candidate outcome MUST NOT change Work status.
+
 ## Publication and observation
 
 - **[ENFORCED]** Effects visible outside Workengine MUST be performed by Workengine, not by the Worker process.
