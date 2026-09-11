@@ -239,12 +239,26 @@ fn serve_starts_work_through_the_local_control_route() {
         "POST /api/v0/works/{id}/start HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
     );
     let response = http_request(port, request.as_bytes()).unwrap();
+    let observation_request = format!(
+        "GET /api/v0/works/{id}/observation HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+    );
+    let observation = http_request(port, observation_request.as_bytes()).unwrap();
     let _ = server.kill();
     let _ = server.wait();
     assert!(response.contains("200 OK"), "response: {response}");
     assert!(
         response.contains("\"status\":\"succeeded\""),
         "response: {response}"
+    );
+    assert!(
+        observation.contains("\"runtimeKind\":\"stub\""),
+        "observation: {observation}"
+    );
+    assert!(
+        observation.contains("\"event\":\"child_stdout\"")
+            && observation.contains("\"payloadRedacted\":true")
+            && observation.contains("\"code\":\"confirmed_success\""),
+        "observation: {observation}"
     );
     assert_eq!(
         status_and_event_count(directory.path(), &id),

@@ -14,7 +14,7 @@ use workengine_application::{
 };
 use workengine_domain::{
     ChannelPolicy, ContentDigest, DomainError, EXECUTION_SPEC_SCHEMA_VERSION, ExecutionSpec,
-    OutcomeKind, SecretRef, Work, WorkId, WorkStatus,
+    OutcomeKind, RuntimeKind, SecretRef, Work, WorkId, WorkStatus,
 };
 
 mod profile;
@@ -285,7 +285,7 @@ enum AnyRunner {
 impl workengine_application::WorkerRunner for AnyRunner {
     fn run(
         &self,
-        request: &workengine_application::RunRequest<'_>,
+        request: &mut workengine_application::RunRequest<'_>,
     ) -> Result<workengine_domain::Outcome, AppError> {
         match self {
             Self::Stub(runner) => runner.run(request),
@@ -306,6 +306,7 @@ struct SelectedRunner {
     retry_limit: u32,
     checkout: Option<PathBuf>,
     worker_config_digest: ContentDigest,
+    runtime_kind: RuntimeKind,
     runtime_digest: ContentDigest,
     secret_refs: Vec<SecretRef>,
 }
@@ -322,6 +323,7 @@ impl SelectedRunner {
             work_id.clone(),
             profile,
             self.worker_config_digest.clone(),
+            self.runtime_kind,
             self.runtime_digest.clone(),
             u64::try_from(budget.as_millis()).unwrap_or(u64::MAX),
             self.retry_limit,
@@ -369,6 +371,12 @@ fn select_runner(
                         .collect::<Vec<_>>()
                 );
                 let runtime_material = format!("{:?}", resolved.sandbox);
+                let runtime_kind = match &resolved.sandbox {
+                    workengine_adapters_worker::Sandbox::Bubblewrap { .. } => {
+                        RuntimeKind::Bubblewrap
+                    }
+                    workengine_adapters_worker::Sandbox::Oci { .. } => RuntimeKind::Oci,
+                };
                 let runner = ProcessWorkerRunner::new(
                     resolved.argv,
                     resolved.secret_files,
@@ -379,6 +387,7 @@ fn select_runner(
                     retry_limit: retry_limit.unwrap_or(resolved.retry_limit),
                     checkout: checkout.or(resolved.checkout),
                     worker_config_digest: digest(config_material.as_bytes())?,
+                    runtime_kind,
                     runtime_digest: digest(runtime_material.as_bytes())?,
                     secret_refs: resolved.secret_refs,
                 });
@@ -398,6 +407,7 @@ fn select_runner(
         retry_limit: retry_limit.unwrap_or(0),
         checkout,
         worker_config_digest: digest(format!("stub:{stub_behavior}").as_bytes())?,
+        runtime_kind: RuntimeKind::Stub,
         runtime_digest: digest(b"workengine-stub-process-v1")?,
         secret_refs: Vec::new(),
     })
