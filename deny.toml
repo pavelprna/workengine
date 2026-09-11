@@ -30,9 +30,7 @@ multiple-versions = "warn"
 wildcards = "deny"
 allow-wildcard-paths = true
 highlight = "all"
-deny = [
-    { name = "tokio", reason = "no async runtime in this product; the loop is spawn, wait, record" },
-]
+deny = []
 allow = []
 skip = []
 skip-tree = []

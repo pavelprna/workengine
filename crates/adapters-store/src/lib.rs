@@ -3,9 +3,9 @@
 use std::path::Path;
 use std::str::FromStr;
 
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
-use workengine_application::{AppError, WorkStore};
+use workengine_application::{AppError, SequencedEvent, WorkQuery, WorkStore};
 use workengine_domain::{
     EVENT_SCHEMA_VERSION, EventKind, OutcomeKind, Work, WorkAttributes, WorkEvent, WorkId,
     WorkStatus,
@@ -84,11 +84,12 @@ pub struct SqliteStore {
     conn: Connection,
 }
 
-/// One immutable event with its cursor. The cursor is the SQLite journal
-/// sequence, so clients resume with `seq > cursor` without relying on clocks.
-pub struct EventRecord {
-    pub seq: u64,
-    pub payload: serde_json::Value,
+/// A read-only SQLite connection for HTTP and CLI observers.
+///
+/// It opens the database with SQLite's read-only flag and never runs recovery
+/// or schema migrations.
+pub struct SqliteObserver {
+    conn: Connection,
 }
 
 impl SqliteStore {
@@ -131,38 +132,49 @@ impl SqliteStore {
             row.created_at_unix_ms as u64,
         ))
     }
+}
 
-    pub fn events_after(
-        &self,
-        after_seq: u64,
-        work_id: Option<&WorkId>,
-    ) -> Result<Vec<EventRecord>, AppError> {
-        let sql = if work_id.is_some() {
-            "SELECT seq, payload FROM events WHERE seq > ?1 AND work_id = ?2 ORDER BY seq"
-        } else {
-            "SELECT seq, payload FROM events WHERE seq > ?1 ORDER BY seq"
-        };
-        let mut statement = self.conn.prepare(sql).map_err(AppError::store)?;
-        let mut rows = if let Some(id) = work_id {
-            statement
-                .query(params![after_seq as i64, id.as_str()])
-                .map_err(AppError::store)?
-        } else {
-            statement
-                .query(params![after_seq as i64])
-                .map_err(AppError::store)?
-        };
-        let mut records = Vec::new();
-        while let Some(row) = rows.next().map_err(AppError::store)? {
-            let seq: i64 = row.get(0).map_err(AppError::store)?;
-            let payload: String = row.get(1).map_err(AppError::store)?;
-            records.push(EventRecord {
-                seq: seq as u64,
-                payload: serde_json::from_str(&payload).map_err(AppError::outcome_schema)?,
-            });
-        }
-        Ok(records)
+impl SqliteObserver {
+    pub fn open(data_dir: impl AsRef<Path>) -> Result<Self, AppError> {
+        let database = data_dir.as_ref().join("workengine.sqlite");
+        let conn = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(AppError::store)?;
+        conn.execute_batch("PRAGMA query_only = ON; PRAGMA foreign_keys = ON;")
+            .map_err(AppError::store)?;
+        Ok(Self { conn })
     }
+}
+
+fn events_after_connection(
+    conn: &Connection,
+    after_seq: u64,
+    work_id: Option<&WorkId>,
+) -> Result<Vec<SequencedEvent>, AppError> {
+    let sql = if work_id.is_some() {
+        "SELECT seq, payload FROM events WHERE seq > ?1 AND work_id = ?2 ORDER BY seq"
+    } else {
+        "SELECT seq, payload FROM events WHERE seq > ?1 ORDER BY seq"
+    };
+    let mut statement = conn.prepare(sql).map_err(AppError::store)?;
+    let mut rows = if let Some(id) = work_id {
+        statement
+            .query(params![after_seq as i64, id.as_str()])
+            .map_err(AppError::store)?
+    } else {
+        statement
+            .query(params![after_seq as i64])
+            .map_err(AppError::store)?
+    };
+    let mut records = Vec::new();
+    while let Some(row) = rows.next().map_err(AppError::store)? {
+        let seq: i64 = row.get(0).map_err(AppError::store)?;
+        let payload: String = row.get(1).map_err(AppError::store)?;
+        records.push(SequencedEvent {
+            seq: seq as u64,
+            event: decode_event(&payload)?,
+        });
+    }
+    Ok(records)
 }
 
 struct WorkRow {
@@ -175,55 +187,81 @@ struct WorkRow {
     schema_version: i64,
 }
 
-impl WorkStore for SqliteStore {
-    fn get(&self, id: &WorkId) -> Result<Option<Work>, AppError> {
-        self.conn
-            .query_row(
-                "SELECT id, status, goal, worker_profile, workspace_root, created_at_unix_ms, schema_version
+fn get_connection(conn: &Connection, id: &WorkId) -> Result<Option<Work>, AppError> {
+    conn
+        .query_row(
+            "SELECT id, status, goal, worker_profile, workspace_root, created_at_unix_ms, schema_version
                  FROM works WHERE id = ?1",
-                [id.as_str()],
-                Self::read_row,
-            )
-            .optional()
-            .map_err(AppError::store)?
-            .map(Self::work_from_row)
-            .transpose()
-    }
+            [id.as_str()],
+            SqliteStore::read_row,
+        )
+        .optional()
+        .map_err(AppError::store)?
+        .map(SqliteStore::work_from_row)
+        .transpose()
+}
 
-    fn list(&self) -> Result<Vec<Work>, AppError> {
-        let mut stmt = self
-            .conn
-            .prepare(
-                "SELECT id, status, goal, worker_profile, workspace_root, created_at_unix_ms, schema_version
+fn list_connection(conn: &Connection) -> Result<Vec<Work>, AppError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, status, goal, worker_profile, workspace_root, created_at_unix_ms, schema_version
                  FROM works",
-            )
-            .map_err(AppError::store)?;
-        let rows = stmt
-            .query_map([], Self::read_row)
-            .map_err(AppError::store)?;
-        let mut works = Vec::new();
-        for row in rows {
-            works.push(Self::work_from_row(row.map_err(AppError::store)?)?);
-        }
-        Ok(works)
+        )
+        .map_err(AppError::store)?;
+    let rows = stmt
+        .query_map([], SqliteStore::read_row)
+        .map_err(AppError::store)?;
+    let mut works = Vec::new();
+    for row in rows {
+        works.push(SqliteStore::work_from_row(row.map_err(AppError::store)?)?);
     }
+    Ok(works)
+}
 
-    fn events(&self, id: &WorkId) -> Result<Vec<WorkEvent>, AppError> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT payload FROM events WHERE work_id = ?1 ORDER BY seq")
-            .map_err(AppError::store)?;
-        let rows = stmt
-            .query_map([id.as_str()], |row| row.get::<_, String>(0))
-            .map_err(AppError::store)?;
-        let mut events = Vec::new();
-        for row in rows {
-            let payload = row.map_err(AppError::store)?;
-            events.push(decode_event(&payload)?);
-        }
-        Ok(events)
+fn events_connection(conn: &Connection, id: &WorkId) -> Result<Vec<WorkEvent>, AppError> {
+    let mut stmt = conn
+        .prepare("SELECT payload FROM events WHERE work_id = ?1 ORDER BY seq")
+        .map_err(AppError::store)?;
+    let rows = stmt
+        .query_map([id.as_str()], |row| row.get::<_, String>(0))
+        .map_err(AppError::store)?;
+    let mut events = Vec::new();
+    for row in rows {
+        events.push(decode_event(&row.map_err(AppError::store)?)?);
     }
+    Ok(events)
+}
 
+macro_rules! impl_work_query {
+    ($type:ty) => {
+        impl WorkQuery for $type {
+            fn get(&self, id: &WorkId) -> Result<Option<Work>, AppError> {
+                get_connection(&self.conn, id)
+            }
+
+            fn list(&self) -> Result<Vec<Work>, AppError> {
+                list_connection(&self.conn)
+            }
+
+            fn events(&self, id: &WorkId) -> Result<Vec<WorkEvent>, AppError> {
+                events_connection(&self.conn, id)
+            }
+
+            fn events_after(
+                &self,
+                after_seq: u64,
+                work_id: Option<&WorkId>,
+            ) -> Result<Vec<SequencedEvent>, AppError> {
+                events_after_connection(&self.conn, after_seq, work_id)
+            }
+        }
+    };
+}
+
+impl_work_query!(SqliteStore);
+impl_work_query!(SqliteObserver);
+
+impl WorkStore for SqliteStore {
     fn put(&mut self, work: &Work, event: WorkEvent) -> Result<(), AppError> {
         let tx = self.conn.transaction().map_err(AppError::store)?;
         put_in_tx(&tx, work, &event)?;

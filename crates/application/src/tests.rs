@@ -10,7 +10,8 @@ use workengine_domain::{
 use crate::clock::Clock;
 use crate::error::{AppError, ChannelReaction};
 use crate::ports::{
-    BindRequest, RunRequest, StartRequest, WorkStore, WorkerRunner, WorkspaceFactory,
+    BindRequest, RunRequest, SequencedEvent, StartRequest, WorkQuery, WorkStore, WorkerRunner,
+    WorkspaceFactory,
 };
 use crate::{complete, create, next, park, recover_unconfirmed, start};
 
@@ -32,7 +33,7 @@ struct FakeStore {
     events: Vec<WorkEvent>,
 }
 
-impl WorkStore for FakeStore {
+impl WorkQuery for FakeStore {
     fn get(&self, id: &WorkId) -> Result<Option<Work>, AppError> {
         Ok(self.works.get(id.as_str()).cloned())
     }
@@ -50,6 +51,27 @@ impl WorkStore for FakeStore {
             .collect())
     }
 
+    fn events_after(
+        &self,
+        after_seq: u64,
+        work_id: Option<&WorkId>,
+    ) -> Result<Vec<SequencedEvent>, AppError> {
+        Ok(self
+            .events
+            .iter()
+            .enumerate()
+            .filter(|(index, event)| {
+                (*index as u64) + 1 > after_seq && work_id.is_none_or(|id| event.work_id() == id)
+            })
+            .map(|(index, event)| SequencedEvent {
+                seq: index as u64 + 1,
+                event: event.clone(),
+            })
+            .collect())
+    }
+}
+
+impl WorkStore for FakeStore {
     fn put(&mut self, work: &Work, event: WorkEvent) -> Result<(), AppError> {
         self.works
             .insert(work.id().as_str().to_owned(), work.clone());

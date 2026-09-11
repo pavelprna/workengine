@@ -5,11 +5,30 @@ use workengine_domain::{Outcome, OutcomeKind, Work, WorkEvent, WorkId, WorkStatu
 
 use crate::error::AppError;
 
-/// Persists current Work status and the append-only event log.
-pub trait WorkStore {
+/// One immutable event with a store-defined, resumable cursor.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SequencedEvent {
+    pub seq: u64,
+    pub event: WorkEvent,
+}
+
+/// Read-only access to Work snapshots and their append-only history.
+///
+/// Observers implement only this port: reads must not recover, transition, or
+/// otherwise mutate Work state.
+pub trait WorkQuery {
     fn get(&self, id: &WorkId) -> Result<Option<Work>, AppError>;
     fn list(&self) -> Result<Vec<Work>, AppError>;
     fn events(&self, id: &WorkId) -> Result<Vec<WorkEvent>, AppError>;
+    fn events_after(
+        &self,
+        after_seq: u64,
+        work_id: Option<&WorkId>,
+    ) -> Result<Vec<SequencedEvent>, AppError>;
+}
+
+/// Persists current Work status and the append-only event log.
+pub trait WorkStore: WorkQuery {
     /// Status update and event append are one operation.
     fn put(&mut self, work: &Work, event: WorkEvent) -> Result<(), AppError>;
 }

@@ -62,7 +62,7 @@ A typical run looks like this:
 2. `next` prints the next startable id.
 3. `start` binds a workspace, writes the goal, optionally copies a checkout,
    runs the Worker, and completes.
-4. If a run is left `running`, the next invocation parks it for recovery. A
+4. If a run is left `running`, the next execution invocation parks it for recovery. A
    shared `outcome.json` is never trusted as a recovery authority.
 
 Workengine never asks a model which Work to take, or which status comes next.
@@ -76,10 +76,15 @@ Agent and tracker names stay in configuration and adapters, not in the core.
 | `next` | Print the next startable Work id |
 | `start --work <id> [--checkout <dir>]` | Bind a workspace, run the Worker, complete |
 | `park --work <id>` | Park leftover `running` Work |
+| `serve [--port 9410]` | Serve the localhost-only, read-only Web observer |
 | `version` | Print `workengine <semver>` |
 
 `--data-dir` (or `WORKENGINE_DATA_DIR`) chooses the SQLite store and workspace
 directories. Default: `.workengine`.
+
+`serve` binds only to `127.0.0.1` and `::1`. Its browser UI and `/api/v0`
+observer API never read SQLite directly and never recover or change Work.
+The API is intentionally internal until the durable execution model is ready.
 
 `--config-dir` (or `WORKENGINE_CONFIG_DIR`) is a directory of Worker profiles:
 one `<profile>.toml` file per profile. That makes validation truly lazy: a bad

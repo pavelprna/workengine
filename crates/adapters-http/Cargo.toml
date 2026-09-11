@@ -1,0 +1,27 @@
+[package]
+name = "workengine-adapters-http"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+description = "Localhost-only HTTP observer adapter for Workengine."
+build = "build.rs"
+
+[dependencies]
+workengine-domain.workspace = true
+workengine-application.workspace = true
+workengine-adapters-store.workspace = true
+axum.workspace = true
+tokio.workspace = true
+async-stream.workspace = true
+mime_guess.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tower.workspace = true
+
+[lints]
+workspace = true

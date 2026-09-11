@@ -21,10 +21,12 @@ The current CLI slice has stable Work identity and attributes, the Work FSM,
 atomic SQLite status and append-only event history, workspace binding and
 append-only memory, versioned typed Worker outcomes, profile-based sandbox
 launch, process-group supervision, structured subprocess records, lazy profile
-validation, and JSON snapshots and event cursors. External dependencies sit
-behind application ports. It does not yet have a daemon, HTTP API, Web UI,
-durable attempt provenance, live control, capture/CAS, inbound sources, or
-publishers.
+validation, and JSON snapshots and event cursors. It also has the v0.1
+foundation: a localhost-only, read-only HTTP/SSE observer API, embedded Web
+application shell, and a read-only query port. The Work list, detail timeline,
+and richer doctor views remain to be delivered. External dependencies sit
+behind application ports. It does not yet have a daemon, durable attempt
+provenance, live control, capture/CAS, external inbound sources, or publishers.
 
 The sandboxed-attempt decision is accepted, but its attempt IDs, protected
 control artifacts, configuration snapshots, checkpoint/abort supervision, and

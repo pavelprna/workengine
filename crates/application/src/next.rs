@@ -1,10 +1,10 @@
 use workengine_domain::{WorkId, WorkStatus};
 
 use crate::error::AppError;
-use crate::ports::WorkStore;
+use crate::ports::WorkQuery;
 
 /// Oldest `ready`, else oldest `parked`. Does not spawn.
-pub fn next(store: &impl WorkStore) -> Result<Option<WorkId>, AppError> {
+pub fn next(store: &impl WorkQuery) -> Result<Option<WorkId>, AppError> {
     let mut works = store.list()?;
     works.sort_by_key(|w| w.created_at_unix_ms());
     if let Some(work) = works.iter().find(|w| w.status() == WorkStatus::Ready) {

@@ -3,17 +3,19 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
-use workengine_adapters_store::SqliteStore;
+use workengine_adapters_http::serve;
+use workengine_adapters_store::{SqliteObserver, SqliteStore};
 use workengine_adapters_worker::{ProcessWorkerRunner, StubBehavior, StubWorkerRunner};
 use workengine_adapters_workspace::DirWorkspaceFactory;
 use workengine_application::{
-    AppError, StartRequest, SystemClock, WorkStore, create, next, park, recover_unconfirmed, start,
+    AppError, StartRequest, SystemClock, WorkQuery, create, next, park, recover_unconfirmed, start,
 };
 use workengine_domain::{DomainError, OutcomeKind, WorkId, WorkStatus};
 
 mod profile;
 
 const DEFAULT_BUDGET: Duration = Duration::from_secs(60);
+const DEFAULT_SERVE_PORT: u16 = 9410;
 
 /// Control plane for coding agents.
 #[derive(Parser)]
@@ -85,6 +87,12 @@ enum Command {
         #[arg(long)]
         work: Option<String>,
     },
+    /// Serve the local read-only Web observer
+    Serve {
+        /// Localhost TCP port for the Web observer
+        #[arg(long, default_value_t = DEFAULT_SERVE_PORT)]
+        port: u16,
+    },
     /// Bind a workspace, run a Worker, and complete
     Start {
         #[arg(long)]
@@ -123,24 +131,24 @@ fn run() -> anyhow::Result<u8> {
             Ok(0)
         }
         Command::Create { goal, profile } => {
-            let mut store = open_store(&data_dir, true)?;
+            let mut store = open_store(&data_dir, false)?;
             let work = create(&mut store, &SystemClock, goal, profile)?;
             println!("{} {}", work.id(), work.status());
             Ok(0)
         }
         Command::Next => {
-            let store = open_store(&data_dir, true)?;
-            if let Some(id) = next(&store)? {
+            let observer = SqliteObserver::open(&data_dir)?;
+            if let Some(id) = next(&observer)? {
                 println!("{id}");
             }
             Ok(0)
         }
         Command::List { json } => {
-            let store = open_store(&data_dir, true)?;
-            let works = store.list()?;
+            let observer = SqliteObserver::open(&data_dir)?;
+            let works = observer.list()?;
             for work in works {
                 if json {
-                    println!("{}", serde_json::to_string(&work_json(&store, &work))?);
+                    println!("{}", serde_json::to_string(&work_json(&observer, &work))?);
                 } else {
                     println!("{} {}", work.id(), work.status());
                 }
@@ -148,23 +156,29 @@ fn run() -> anyhow::Result<u8> {
             Ok(0)
         }
         Command::Show { work, json } => {
-            let store = open_store(&data_dir, true)?;
+            let observer = SqliteObserver::open(&data_dir)?;
             let id = WorkId::parse(work)?;
-            let work = store.get(&id)?.ok_or(AppError::NotFound(id))?;
+            let work = observer.get(&id)?.ok_or(AppError::NotFound(id))?;
             if json {
-                println!("{}", serde_json::to_string(&work_json(&store, &work))?);
+                println!("{}", serde_json::to_string(&work_json(&observer, &work))?);
             } else {
                 println!("{} {}", work.id(), work.status());
             }
             Ok(0)
         }
         Command::Events { after_seq, work } => {
-            let store = open_store(&data_dir, true)?;
+            let observer = SqliteObserver::open(&data_dir)?;
             let id = work.map(WorkId::parse).transpose()?;
-            for mut event in store.events_after(after_seq, id.as_ref())? {
-                event.payload["seq"] = serde_json::json!(event.seq);
-                println!("{}", serde_json::to_string(&event.payload)?);
+            for event in observer.events_after(after_seq, id.as_ref())? {
+                println!("{}", serde_json::to_string(&event_json(&event))?);
             }
+            Ok(0)
+        }
+        Command::Serve { port } => {
+            // Initialize a fresh local store if needed, but never recover Work.
+            let _store = SqliteStore::open(&data_dir)?;
+            let observer = SqliteObserver::open(&data_dir)?;
+            serve(observer, port, version_line())?;
             Ok(0)
         }
         Command::Start { work, checkout } => {
@@ -205,7 +219,7 @@ fn run() -> anyhow::Result<u8> {
             Ok(exit_for_status(work.status(), outcome_kind(&store, &id)?))
         }
         Command::Park { work } => {
-            let mut store = open_store(&data_dir, true)?;
+            let mut store = open_store(&data_dir, false)?;
             let id = WorkId::parse(work)?;
             let parked = park(&mut store, &SystemClock, &id)?;
             println!("{} {}", parked.id(), parked.status());
@@ -326,8 +340,8 @@ fn outcome_kind(store: &SqliteStore, id: &WorkId) -> Result<Option<OutcomeKind>,
     Ok(store.events(id)?.last().and_then(|e| e.outcome_kind()))
 }
 
-fn work_json(store: &SqliteStore, work: &workengine_domain::Work) -> serde_json::Value {
-    let outcome = store
+fn work_json(query: &impl WorkQuery, work: &workengine_domain::Work) -> serde_json::Value {
+    let outcome = query
         .events(work.id())
         .ok()
         .and_then(|events| events.last().and_then(|event| event.outcome_kind()))
@@ -343,6 +357,23 @@ fn work_json(store: &SqliteStore, work: &workengine_domain::Work) -> serde_json:
         "activeExecution": null,
         "activeAttempt": null,
         "checkpoint": null,
+    })
+}
+
+fn event_json(event: &workengine_application::SequencedEvent) -> serde_json::Value {
+    let record = &event.event;
+    serde_json::json!({
+        "schemaVersion": record.schema_version(),
+        "workId": record.work_id().as_str(),
+        "kind": record.kind().as_str(),
+        "from": record.from().map(WorkStatus::as_str),
+        "to": record.to().as_str(),
+        "goal": record.attributes().map(|attributes| attributes.goal()),
+        "workerProfile": record.attributes().map(|attributes| attributes.worker_profile()),
+        "outcomeKind": record.outcome_kind().map(|kind| kind.as_str()),
+        "workspaceRoot": record.workspace_root(),
+        "createdAtUnixMs": record.created_at_unix_ms(),
+        "seq": event.seq,
     })
 }
 

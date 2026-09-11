@@ -13,7 +13,7 @@ These are public contracts. A breaking change is a major version, plus a migrati
 
 | Surface | Compatibility |
 | --- | --- |
-| CLI command names (`create`, `next`, `start`, `park`, `version`) | Stable |
+| CLI command names (`create`, `next`, `start`, `park`, `serve`, `version`) | Stable |
 | CLI `version` prefix | `workengine <semver>` where semver is `CARGO_PKG_VERSION` |
 | CLI flags and env vars documented in `--help` | Stable (`--config-dir` / `WORKENGINE_CONFIG_DIR`, `start --checkout`) |
 | Process exit codes | Stable; see table below |
@@ -34,6 +34,7 @@ Changing these is not a SemVer break.
 | JSON key order | Parsers MUST NOT depend on order |
 | Internal crate and module names | `workengine-domain` is not a public library API |
 | Adapter internals, SQL without `schemaVersion` | Private |
+| `/api/v0` observer API and `contracts/observer.openapi.yaml` | Explicitly internal until durable execution permits a public v1 |
 | Help wording, man page prose | Behaviour and flags matter |
 | Worker profile names (delivery phases) | Configuration, versioned separately from the core |
 

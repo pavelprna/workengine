@@ -66,6 +66,8 @@ These are not SemVer surfaces and not architecture. Canon for commits is `CONTRI
 | F21 | Workspace has append-only memory; write only after a confirmed outcome; repeat complete does not duplicate the last line | workspace / application test | enforced |
 | F24 | Channel errors are classified as retry, fail, or park; fail completes as `channel_error`; park does not complete | application test | enforced |
 | F25 | Process Worker env is empty except secret-file paths; secret values are transient host `0600` files and missing outcome is `failed`, not exit-code success | worker adapter test | enforced |
+| F26 | Read observers (`list`, `show`, `events`, HTTP, SSE) do not recover or append a Work event | CLI / HTTP integration test | enforced |
+| F27 | Tokio is confined to the HTTP adapter; domain and application stay synchronous | CLI architecture test | enforced |
 
 ## How to add a check
 

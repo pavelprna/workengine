@@ -6,7 +6,11 @@ Trait signatures below are intent, not frozen Rust. The crate is the API. Behavi
 
 `WorkspaceFactory::bind` takes a `BindRequest` (goal text, optional checkout). `start` takes a `StartRequest` (budget, retry limit snapshotted for the call, optional checkout).
 
-## WorkStore
+## WorkQuery and WorkStore
+
+`WorkQuery` reads current Work and its sequenced immutable events. It has no
+transition or recovery operation. `WorkStore` extends it with the atomic
+status-plus-event write used by control-plane use cases.
 
 Persists current Work status and the append-only event log.
 
@@ -48,13 +52,15 @@ Wall-clock timestamps for `create` and for `Started` / `Completed` / `Parked` ev
 
 Used by `create`, `start`, `complete`, and `park`. No separate spec.
 
-## Inbound (not first slice)
+## Inbound
 
-Creates Work from an external source after an explicit ready signal.
+Creates Work from an external source after an explicit ready signal. The local
+HTTP observer is also inbound in transport terms, but is deliberately read-only
+and is not an external source.
 
 | First adapter | Next |
 | --- | --- |
-| None. CLI creates Work | Any tracker behind the port |
+| Localhost HTTP query/SSE observer; CLI creates Work | Any tracker behind the port |
 
 The domain does not mention a tracker. Adding a source is a new adapter crate or module, not a new entity. See [work.md](../spec/work.md) Source.
 

@@ -1,4 +1,5 @@
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 fn bin() -> Command {
     Command::new(env!("CARGO_BIN_EXE_workengine"))
@@ -36,6 +37,32 @@ fn create_work(data_dir: &std::path::Path) -> String {
         .next()
         .unwrap()
         .to_owned()
+}
+
+fn force_running(data_dir: &std::path::Path, id: &str) {
+    let database = data_dir.join("workengine.sqlite");
+    let connection = rusqlite::Connection::open(database).unwrap();
+    connection
+        .execute("UPDATE works SET status = 'running' WHERE id = ?1", [id])
+        .unwrap();
+}
+
+fn status_and_event_count(data_dir: &std::path::Path, id: &str) -> (String, i64) {
+    let database = data_dir.join("workengine.sqlite");
+    let connection = rusqlite::Connection::open(database).unwrap();
+    let status = connection
+        .query_row("SELECT status FROM works WHERE id = ?1", [id], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let events = connection
+        .query_row(
+            "SELECT COUNT(*) FROM events WHERE work_id = ?1",
+            [id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    (status, events)
 }
 
 #[test]
@@ -87,6 +114,83 @@ fn create_next_start_succeeds() {
         .unwrap();
     assert!(next_again.status.success());
     assert!(stdout(&next_again).is_empty());
+}
+
+#[test]
+fn read_commands_do_not_recover_running_work() {
+    let directory = tempfile::tempdir().unwrap();
+    let id = create_work(directory.path());
+    force_running(directory.path(), &id);
+
+    for command in ["list", "show", "events"] {
+        let mut invocation = bin();
+        invocation.args(["--data-dir", directory.path().to_str().unwrap(), command]);
+        if command == "show" {
+            invocation.args(["--work", &id]);
+        }
+        let output = invocation.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{command}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            status_and_event_count(directory.path(), &id),
+            ("running".to_owned(), 1)
+        );
+    }
+}
+
+#[test]
+fn serve_exposes_embedded_health_without_recovery() {
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+
+    let directory = tempfile::tempdir().unwrap();
+    let id = create_work(directory.path());
+    force_running(directory.path(), &id);
+    let listener = match TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => listener,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(error) => panic!("reserve localhost port: {error}"),
+    };
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let mut server = bin()
+        .args([
+            "--data-dir",
+            directory.path().to_str().unwrap(),
+            "serve",
+            "--port",
+            &port.to_string(),
+        ])
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut response = String::new();
+    while Instant::now() < deadline {
+        if let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)) {
+            stream
+                .write_all(
+                    b"GET /api/v0/health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+            stream.read_to_string(&mut response).unwrap();
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let _ = server.kill();
+    let _ = server.wait();
+    assert!(response.contains("200 OK"), "response: {response}");
+    assert!(
+        response.contains("\"status\":\"ok\""),
+        "response: {response}"
+    );
+    assert_eq!(
+        status_and_event_count(directory.path(), &id),
+        ("running".to_owned(), 1)
+    );
 }
 
 #[test]

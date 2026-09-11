@@ -5,7 +5,7 @@ Workengine is a hexagonal control plane. Layers are Cargo crates. A forbidden de
 ## System (C4 container)
 
 ```
-                    inbound (later)
+                 inbound: HTTP observer
                          |
                          v
 +------------------------------------------------------+
@@ -31,7 +31,8 @@ Workengine is a hexagonal control plane. Layers are Cargo crates. A forbidden de
          +----------------------------------------+
 ```
 
-Inbound and Publisher are ports. They are not part of the first vertical slice. Until they exist, Work is created by the CLI `create` verb.
+The local HTTP observer is an inbound read adapter. It does not create or
+change Work. Publisher remains later; Work is created by the CLI `create` verb.
 
 ## Crates
 
@@ -42,6 +43,7 @@ Inbound and Publisher are ports. They are not part of the first vertical slice. 
 | `crates/adapters-store` | `workengine-adapters-store` | `WorkStore` implementations. |
 | `crates/adapters-worker` | `workengine-adapters-worker` | `WorkerRunner` implementations (stub and generic process). |
 | `crates/adapters-workspace` | `workengine-adapters-workspace` | `WorkspaceFactory` implementations. |
+| `crates/adapters-http` | `workengine-adapters-http` | Localhost-only HTTP/SSE read observer and embedded Web UI. |
 | `crates/cli` | `workengine-cli` (bin `workengine`) | Composition root. |
 
 `workengine-cli` depends on application and on adapters. `workengine-domain` depends on none of them.
@@ -53,6 +55,7 @@ workengine-cli
   ├── workengine-adapters-store      → application + domain
   ├── workengine-adapters-worker     → application + domain
   └── workengine-adapters-workspace  → application + domain
+  └── workengine-adapters-http        → application + store
 ```
 
 Do not split further on day one. Inside a crate, use modules.

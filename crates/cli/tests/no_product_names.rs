@@ -36,6 +36,19 @@ fn domain_src_has_no_product_or_tracker_names() {
     );
 }
 
+#[test]
+fn async_runtime_is_not_in_domain_or_application() {
+    for manifest in [
+        include_str!("../../domain/Cargo.toml"),
+        include_str!("../../application/Cargo.toml"),
+    ] {
+        assert!(
+            !manifest.contains("tokio"),
+            "Tokio belongs only to the HTTP adapter, never domain or application"
+        );
+    }
+}
+
 fn visit(dir: &Path, hits: &mut Vec<String>) {
     for entry in fs::read_dir(dir).unwrap() {
         let path = entry.unwrap().path();

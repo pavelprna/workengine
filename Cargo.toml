@@ -6,6 +6,7 @@ members = [
   "crates/adapters-store",
   "crates/adapters-worker",
   "crates/adapters-workspace",
+  "crates/adapters-http",
   "crates/cli",
 ]
 
@@ -22,6 +23,7 @@ workengine-application = { path = "crates/application" }
 workengine-adapters-store = { path = "crates/adapters-store" }
 workengine-adapters-worker = { path = "crates/adapters-worker" }
 workengine-adapters-workspace = { path = "crates/adapters-workspace" }
+workengine-adapters-http = { path = "crates/adapters-http" }
 clap = { version = "4.6.6", default-features = false, features = ["std", "derive", "help", "usage", "error-context", "env"] }
 thiserror = "2.0.20"
 anyhow = "1.0.104"
@@ -34,6 +36,11 @@ tempfile = "3.27.0"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", default-features = false, features = ["fmt", "env-filter", "std", "ansi"] }
 toml = { version = "0.8.23", default-features = false, features = ["parse"] }
+axum = { version = "0.8.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
+tokio = { version = "1.48.0", features = ["macros", "net", "rt-multi-thread", "time"] }
+async-stream = "0.3.6"
+mime_guess = "2.0.5"
+tower = { version = "0.5.3", default-features = false, features = ["util"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
