@@ -28,6 +28,9 @@ export function LiveEventsProvider({ children }: { children: ReactNode }) {
       for (const workId of dirtyWorkIds) {
         void queryClient.invalidateQueries({ queryKey: ["work", workId] });
         void queryClient.invalidateQueries({ queryKey: ["events", workId] });
+        void queryClient.invalidateQueries({
+          queryKey: ["observation", workId],
+        });
       }
       dirtyWorkIds.clear();
     }

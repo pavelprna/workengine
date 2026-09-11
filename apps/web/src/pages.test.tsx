@@ -123,6 +123,82 @@ beforeEach(() => {
         outcomeKind: "succeeded",
       });
     }
+    if (url.pathname === "/api/v0/works/work-detail/observation") {
+      return response({
+        executions: [
+          {
+            executionId: "execution-detail",
+            createdAtUnixMs: "1100",
+            spec: {
+              schemaVersion: 1,
+              workerProfile: "stub",
+              workerConfigDigest: `sha256:${"1".repeat(64)}`,
+              runtimeKind: "bubblewrap",
+              runtimeDigest: `sha256:${"2".repeat(64)}`,
+              wallClockBudgetMs: "5000",
+              retryLimit: 1,
+              channelPolicy: "retry_then_fail",
+              secretRefs: [],
+            },
+            attempts: [
+              {
+                attemptId: "attempt-detail",
+                state: "confirmed",
+                retryOrdinal: 0,
+                startedAtUnixMs: "1100",
+                lastHeartbeatAtUnixMs: "1900",
+                finishedAtUnixMs: "2000",
+                terminalReason: "succeeded",
+                checkpoint: "not_recorded",
+                processRecords: [
+                  {
+                    event: "spawned",
+                    occurrences: "1",
+                    firstObservedAtUnixMs: "1100",
+                    lastObservedAtUnixMs: "1100",
+                    payloadRedacted: false,
+                  },
+                  {
+                    event: "child_stdout",
+                    occurrences: "4",
+                    firstObservedAtUnixMs: "1200",
+                    lastObservedAtUnixMs: "1800",
+                    payloadRedacted: true,
+                  },
+                ],
+                confirmedOutcome: {
+                  schemaVersion: 1,
+                  kind: "succeeded",
+                  workerProfile: "stub",
+                  confirmedAtUnixMs: "2000",
+                },
+              },
+            ],
+          },
+        ],
+        artifacts: [
+          {
+            kind: "confirmed_outcome",
+            label: "Confirmed succeeded outcome",
+            href: "/api/v0/proof",
+            executionId: "execution-detail",
+            attemptId: "attempt-detail",
+            authoredBy: "stub",
+            createdAtUnixMs: "2000",
+          },
+        ],
+        diagnostics: [
+          {
+            severity: "info",
+            code: "confirmed_success",
+            message:
+              "The matching attempt produced a confirmed successful outcome.",
+            executionId: "execution-detail",
+            attemptId: "attempt-detail",
+          },
+        ],
+      });
+    }
     if (url.pathname === "/api/v0/works") {
       return response({
         items: [work("work-a", "alpha"), work("work-b", "bravo", "succeeded")],
@@ -224,6 +300,23 @@ test.serial("detail renders the chronological event timeline", async () => {
   expect(screen.getByRole("heading", { name: "Event timeline" })).toBeTruthy();
   expect(screen.getByText(/event #1/)).toBeTruthy();
   expect(screen.getByText(/event #2/)).toBeTruthy();
+});
+
+test.serial("detail explains execution and links proof artifacts", async () => {
+  const router = createAppRouter();
+  await router.navigate({
+    to: "/works/$workId",
+    params: { workId: "work-detail" },
+  });
+  renderApp(router);
+  await screen.findByRole("heading", { name: "Execution ledger" });
+  expect(screen.getByText("bubblewrap")).toBeTruthy();
+  expect(screen.getByText("child_stdout")).toBeTruthy();
+  expect(screen.getByText("payload redacted")).toBeTruthy();
+  expect(screen.getByText("confirmed success")).toBeTruthy();
+  expect(
+    screen.getByRole("link", { name: /Confirmed succeeded outcome/ }),
+  ).toBeTruthy();
 });
 
 test.serial(

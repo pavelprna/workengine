@@ -27,6 +27,11 @@ export type WorkStatus = (typeof workStatuses)[number];
 export type WorkSnapshot = components["schemas"]["WorkSnapshot"];
 export type WorkEvent = components["schemas"]["Event"];
 export type Overview = components["schemas"]["Overview"];
+export type WorkObservation = components["schemas"]["WorkObservation"];
+export type Execution = components["schemas"]["Execution"];
+export type Attempt = components["schemas"]["Attempt"];
+export type Artifact = components["schemas"]["Artifact"];
+export type Diagnostic = components["schemas"]["Diagnostic"];
 
 export type WorkFilters = {
   status?: WorkStatus;
@@ -109,6 +114,22 @@ export const api = {
       queryFn: ({ pageParam }) => getEvents(workId, pageParam),
       getNextPageParam: (page) => page.nextCursor ?? undefined,
     }),
+  useObservation: (workId: string) =>
+    useQuery({
+      queryKey: ["observation", workId],
+      refetchInterval: 2_000,
+      queryFn: async () => {
+        const { data, error } = await client.GET(
+          "/api/v0/works/{workId}/observation",
+          { params: { path: { workId } } },
+        );
+        if (!data)
+          throw new Error(
+            errorMessage(error, "Execution observation was not found"),
+          );
+        return data;
+      },
+    }),
   useCreateWork: () => {
     const queryClient = useQueryClient();
     return useMutation({
@@ -145,6 +166,9 @@ export const api = {
         void queryClient.invalidateQueries({ queryKey: ["works"] });
         void queryClient.invalidateQueries({
           queryKey: ["events", work.workId],
+        });
+        void queryClient.invalidateQueries({
+          queryKey: ["observation", work.workId],
         });
       },
     });

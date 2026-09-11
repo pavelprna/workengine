@@ -13,17 +13,28 @@ import {
   CircleDot,
   Database,
   FileClock,
+  FileJson,
   Filter,
+  Fingerprint,
+  Gauge,
+  HeartPulse,
   ListFilter,
+  PackageOpen,
   Play,
   Plus,
   Radio,
   RefreshCw,
+  RotateCcw,
   ShieldCheck,
+  Terminal,
 } from "lucide-react";
 import { type FormEvent, useState } from "react";
 import {
+  type Artifact,
+  type Attempt,
   api,
+  type Diagnostic,
+  type Execution,
   type WorkEvent,
   type WorkFilters,
   type WorkSnapshot,
@@ -42,6 +53,13 @@ function timeParts(unixMs: string) {
       timeStyle: "short",
     }).format(date),
   };
+}
+
+function durationLabel(milliseconds: number) {
+  if (milliseconds < 1_000) return `${Math.max(0, milliseconds)} ms`;
+  const seconds = milliseconds / 1_000;
+  if (seconds < 60) return `${seconds.toFixed(seconds < 10 ? 1 : 0)} s`;
+  return `${Math.floor(seconds / 60)}m ${Math.round(seconds % 60)}s`;
 }
 
 function StatusBadge({ status }: { status: WorkStatus }) {
@@ -208,11 +226,11 @@ export function OverviewPage() {
   return (
     <>
       <header className="page-header overview-header">
-        <p className="eyebrow">LOCAL CONTROL PLANE · v0.3</p>
-        <h1>Make the queue visible.</h1>
+        <p className="eyebrow">LOCAL CONTROL PLANE · v0.4</p>
+        <h1>Every outcome has a trail.</h1>
         <p className="lede">
-          Durable Work is the record. This operator surface is only a window
-          into it — and a narrow front door for new tasks.
+          Durable Work is the record. Follow every execution from immutable
+          configuration to the attempt that proved its outcome.
         </p>
       </header>
       <section className="overview-grid" aria-label="System overview">
@@ -452,10 +470,224 @@ function Timeline({ events }: { events: WorkEvent[] }) {
   );
 }
 
+function DiagnosticList({ diagnostics }: { diagnostics: Diagnostic[] }) {
+  return (
+    <section className="diagnostic-ribbon" aria-label="Execution diagnostics">
+      {diagnostics.map((diagnostic, index) => (
+        <div
+          className={`diagnostic ${diagnostic.severity}`}
+          key={`${diagnostic.code}-${diagnostic.attemptId ?? index}`}
+        >
+          <CircleAlert size={16} />
+          <div>
+            <strong>{diagnostic.code.replaceAll("_", " ")}</strong>
+            <p>{diagnostic.message}</p>
+          </div>
+        </div>
+      ))}
+    </section>
+  );
+}
+
+function ProcessRecords({ attempt }: { attempt: Attempt }) {
+  if (attempt.processRecords.length === 0) {
+    return <p className="record-empty">No process metadata recorded.</p>;
+  }
+  return (
+    <section className="process-records" aria-label="Redacted process records">
+      {attempt.processRecords.map((record) => (
+        <div className="process-record" key={record.event}>
+          <Terminal size={14} />
+          <code>{record.event}</code>
+          <strong>×{record.occurrences}</strong>
+          {record.payloadRedacted && <span>payload redacted</span>}
+        </div>
+      ))}
+    </section>
+  );
+}
+
+function AttemptCard({
+  attempt,
+  budgetMs,
+}: {
+  attempt: Attempt;
+  budgetMs: number;
+}) {
+  const started = timeParts(attempt.startedAtUnixMs);
+  const heartbeat = timeParts(attempt.lastHeartbeatAtUnixMs);
+  const observedUntil = Number(
+    attempt.finishedAtUnixMs ?? attempt.lastHeartbeatAtUnixMs,
+  );
+  const used = Math.max(0, observedUntil - Number(attempt.startedAtUnixMs));
+  const budgetPercent = Math.min(100, Math.round((used / budgetMs) * 100));
+  return (
+    <article className={`attempt-card ${attempt.state}`}>
+      <div className="attempt-heading">
+        <div>
+          <p className="attempt-index">
+            ATTEMPT {attempt.retryOrdinal + 1}
+            {attempt.retryOrdinal > 0 && (
+              <span>
+                <RotateCcw size={11} /> retry
+              </span>
+            )}
+          </p>
+          <code>{attempt.attemptId}</code>
+        </div>
+        <span className={`attempt-state ${attempt.state}`}>
+          {attempt.state}
+        </span>
+      </div>
+      <div className="attempt-vitals">
+        <div>
+          <HeartPulse size={14} />
+          <span>last heartbeat</span>
+          <time dateTime={heartbeat.dateTime}>{heartbeat.label}</time>
+        </div>
+        <div>
+          <Gauge size={14} />
+          <span>budget observed</span>
+          <strong>
+            {durationLabel(used)} / {durationLabel(budgetMs)}
+          </strong>
+        </div>
+        <div>
+          <PackageOpen size={14} />
+          <span>checkpoint</span>
+          <strong>{attempt.checkpoint.replaceAll("_", " ")}</strong>
+        </div>
+      </div>
+      <div
+        aria-label="Observed wall-clock budget"
+        aria-valuemax={100}
+        aria-valuemin={0}
+        aria-valuenow={budgetPercent}
+        className="budget-track"
+        role="progressbar"
+      >
+        <span style={{ width: `${budgetPercent}%` }} />
+      </div>
+      <p className="attempt-started">
+        Started <time dateTime={started.dateTime}>{started.label}</time>
+        {attempt.terminalReason && (
+          <>
+            {" "}
+            · terminal reason <strong>{attempt.terminalReason}</strong>
+          </>
+        )}
+      </p>
+      <ProcessRecords attempt={attempt} />
+    </article>
+  );
+}
+
+function ExecutionCard({
+  execution,
+  number,
+}: {
+  execution: Execution;
+  number: number;
+}) {
+  const created = timeParts(execution.createdAtUnixMs);
+  const budgetMs = Number(execution.spec.wallClockBudgetMs);
+  return (
+    <article className="execution-card">
+      <header className="execution-heading">
+        <div>
+          <p className="panel-kicker">EXECUTION {number}</p>
+          <h3>{execution.spec.workerProfile}</h3>
+          <code>{execution.executionId}</code>
+        </div>
+        <time dateTime={created.dateTime}>{created.label}</time>
+      </header>
+      <div className="spec-grid">
+        <div>
+          <Fingerprint size={15} />
+          <span>CONFIG DIGEST</span>
+          <code title={execution.spec.workerConfigDigest}>
+            {execution.spec.workerConfigDigest}
+          </code>
+        </div>
+        <div>
+          <ShieldCheck size={15} />
+          <span>SANDBOX</span>
+          <strong>{execution.spec.runtimeKind}</strong>
+          <code title={execution.spec.runtimeDigest}>
+            {execution.spec.runtimeDigest}
+          </code>
+        </div>
+        <div>
+          <Gauge size={15} />
+          <span>BUDGET</span>
+          <strong>{durationLabel(budgetMs)}</strong>
+          <small>{execution.spec.channelPolicy.replaceAll("_", " ")}</small>
+        </div>
+        <div>
+          <RotateCcw size={15} />
+          <span>RETRIES</span>
+          <strong>
+            {Math.max(0, execution.attempts.length - 1)} /{" "}
+            {execution.spec.retryLimit}
+          </strong>
+          <small>{execution.attempts.length} process attempt(s)</small>
+        </div>
+      </div>
+      <div className="attempt-stack">
+        {execution.attempts.map((attempt) => (
+          <AttemptCard
+            attempt={attempt}
+            budgetMs={budgetMs}
+            key={attempt.attemptId}
+          />
+        ))}
+      </div>
+    </article>
+  );
+}
+
+function ArtifactCatalogue({ artifacts }: { artifacts: Artifact[] }) {
+  return (
+    <section
+      className="content-panel artifact-panel"
+      aria-labelledby="artifact-title"
+    >
+      <div className="section-heading">
+        <div>
+          <p className="panel-kicker">FINITE PROOF PATH</p>
+          <h2 id="artifact-title">Artifact catalogue</h2>
+        </div>
+        <span className="readout">CONTROL PLANE ONLY</span>
+      </div>
+      <div className="artifact-list">
+        {artifacts.map((artifact) => (
+          <a
+            href={artifact.href}
+            key={artifact.href}
+            rel="noreferrer"
+            target="_blank"
+          >
+            <FileJson size={17} />
+            <span>
+              <strong>{artifact.label}</strong>
+              <small>
+                {artifact.kind.replaceAll("_", " ")} · authored by{" "}
+                {artifact.authoredBy}
+              </small>
+            </span>
+            <ArrowUpRight size={15} />
+          </a>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 export function WorkDetailPage() {
   const { workId } = useParams({ from: workRoute.id });
   const work = api.useWork(workId);
   const events = api.useEvents(workId);
+  const observation = api.useObservation(workId);
   const startWork = api.useStartWork();
   const allEvents = events.data?.pages.flatMap((page) => page.items) ?? [];
 
@@ -488,7 +720,7 @@ export function WorkDetailPage() {
       </header>
       <section className="launch-strip" aria-label="Execution control">
         <div>
-          <p className="panel-kicker">OPERATOR LAUNCH · v0.3</p>
+          <p className="panel-kicker">OPERATOR LAUNCH · FOREGROUND</p>
           <strong>
             {work.data.status === "ready" || work.data.status === "parked"
               ? "Ready for an explicit start"
@@ -541,6 +773,49 @@ export function WorkDetailPage() {
           <strong>{work.data.outcomeKind ?? "not confirmed"}</strong>
         </div>
       </section>
+      {observation.isPending && (
+        <p className="quiet observation-loading">Reading execution proof…</p>
+      )}
+      {observation.isError && (
+        <QueryError
+          message={observation.error.message}
+          retry={() => void observation.refetch()}
+        />
+      )}
+      {observation.data && (
+        <>
+          <DiagnosticList diagnostics={observation.data.diagnostics} />
+          <section
+            className="execution-section"
+            aria-labelledby="execution-title"
+          >
+            <div className="section-heading execution-section-heading">
+              <div>
+                <p className="panel-kicker">COMPLETE OBSERVATION · v0.4</p>
+                <h2 id="execution-title">Execution ledger</h2>
+              </div>
+              <span className="readout">OLDEST FIRST</span>
+            </div>
+            {observation.data.executions.length === 0 ? (
+              <div className="empty-state compact-empty">
+                <Fingerprint size={24} />
+                <p>The first immutable execution will appear after launch.</p>
+              </div>
+            ) : (
+              <div className="execution-list">
+                {observation.data.executions.map((execution, index) => (
+                  <ExecutionCard
+                    execution={execution}
+                    key={execution.executionId}
+                    number={index + 1}
+                  />
+                ))}
+              </div>
+            )}
+          </section>
+          <ArtifactCatalogue artifacts={observation.data.artifacts} />
+        </>
+      )}
       <section
         className="content-panel timeline-panel"
         aria-labelledby="timeline-title"
@@ -612,7 +887,7 @@ export function DoctorPage() {
           <ShieldCheck size={20} />
           <span>LISTENER</span>
           <strong>localhost</strong>
-          <p>No remote bind or authentication in v0.3.</p>
+          <p>No remote bind or authentication in v0.4.</p>
         </div>
       </section>
       {health.isError && (
@@ -627,7 +902,7 @@ export function DoctorPage() {
       >
         <div className="section-heading">
           <div>
-            <p className="panel-kicker">V0.3 CAPABILITIES</p>
+            <p className="panel-kicker">V0.4 CAPABILITIES</p>
             <h2 id="capability-title">What this surface may do</h2>
           </div>
           {health.data && <code>{health.data.version}</code>}
@@ -643,6 +918,10 @@ export function DoctorPage() {
           </div>
           <div>
             <dt>Explicitly start ready or parked Work</dt>
+            <dd className="yes">yes</dd>
+          </div>
+          <div>
+            <dt>Explain execution, attempts, and proof artifacts</dt>
             <dd className="yes">yes</dd>
           </div>
           <div>
