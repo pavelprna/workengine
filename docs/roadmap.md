@@ -35,12 +35,16 @@ daemon as lifecycle owner, daemon-client CLI commands, checkpointed park,
 distinct abort, same-execution resume, durable answers and consent, and
 ownership-checked crash reclamation. External dependencies sit behind
 application ports. It does not yet have capture, external inbound sources, or
-publishers.
+publishers. v0.6 closes the local Worker policy with verified runtime digests,
+finite resource limits, mandatory seccomp and capability dropping,
+deny-by-default brokered egress, no-follow control-plane file handling, and a
+cleared runtime environment.
 
 The sandboxed-attempt decision is accepted. Attempt IDs, immutable execution
 snapshots, per-Work active leases, and confirmed outcomes are present;
 protected Worker-writable control artifacts and checkpoint/abort supervision
-are present; stronger resource and egress containment remains v0.6 work.
+are present; resource and egress containment are enforced by the v0.6 profile
+policy.
 See [ADR 0005](adr/0005-sandboxed-attempt-protocol.md).
 
 ## v0.1 — Observe and intake

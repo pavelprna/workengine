@@ -112,7 +112,7 @@ These are not the first vertical slice. They remain invariants of the product.
 
 - **[UNTESTED]** Remote mutations (for example git compare-and-swap) MUST use compare-and-swap semantics, not blind overwrite.
 - **[UNTESTED]** Mutating a codebase MUST happen only in an explicitly expected context. A mismatch MUST stop the operation.
-- **[UNTESTED]** Secrets that appear in logs or external output MUST be scrubbed before publication.
+- **[TESTED]** Secrets that appear in logs or external output MUST be scrubbed before publication. The current process boundary publishes payload-free event counts only; no publisher adapter exists yet.
 
 ## Truth in code
 

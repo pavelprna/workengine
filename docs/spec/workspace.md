@@ -12,15 +12,15 @@ This document is the canonical behaviour of Workspace. Keywords follow [RFC 2119
 
 ## Containment
 
-- **[UNTESTED]** A Worker MUST NOT be able to access paths outside the workspace root that Workengine assigned.
+- **[TESTED]** A Worker MUST NOT be able to access paths outside the workspace root that Workengine assigned.
 - **[TESTED]** The first runtime slice MAY implement containment as a dedicated directory. Later adapters MAY use git worktrees or containers behind the same `WorkspaceFactory` port.
 - **[TESTED]** The first-slice dedicated directory MUST be uniquely derived from `WorkId`. It MAY start empty; copying an operator checkout is optional and happens only on first bind.
-- **[UNTESTED]** Workengine's own operations on a codebase MUST be isolated from user-supplied environment settings that a Worker could change.
+- **[TESTED]** Workengine's own operations on a codebase MUST be isolated from user-supplied environment settings that a Worker could change.
 
 ## Lifecycle
 
-- **[UNTESTED]** A Workspace MUST NOT be deleted automatically when a Work fails. After failure it is a diagnostic artifact, not garbage.
-- **[UNTESTED]** Operator-driven cleanup of a workspace MUST be a separate, explicit action.
+- **[TESTED]** A Workspace MUST NOT be deleted automatically when a Work fails. After failure it is a diagnostic artifact, not garbage.
+- **[ENFORCED]** Operator-driven cleanup of a workspace MUST be a separate, explicit action. No cleanup operation exists in this slice.
 
 ## Memory
 

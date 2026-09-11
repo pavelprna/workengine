@@ -39,7 +39,9 @@ Short model for a control plane that spawns processes, holds workspace copies, a
 | Worker writes Work status or publishes as if it were the system | Worker is a process; only Workengine writes the store and publish port |
 | Prompt injection from a ticket or webpage | Inbound text is data. Free text is never a control command |
 | Secret in config committed or logged | Secrets by reference only. Scrub before publish. No values in issues or logs |
-| Worker escapes the workspace | User profiles select Bubblewrap or OCI; the runner mounts only the declared runtime and workspace, and fails closed without a backend |
+| Worker escapes the workspace | User profiles select Bubblewrap or OCI; runtime digests and seccomp are verified, capabilities are dropped, resources are finite, only declared mounts exist, and the runner fails closed without the policy |
+| Worker obtains ambient network access | Both backends retain an isolated network namespace; an explicit profile may mount only a policy-broker Unix socket |
+| Worker swaps an artifact for a host symlink | Worker-writable outcome/checkpoint and control-plane workspace/store files are opened no-follow and directory/resource types are checked |
 | Timeout or abort kills parent, children remain | Process group terminate then kill (Unix in this slice) |
 | Daemon crash leaves an unconfirmed Worker | Protected runtime owner record binds PID, process group, process start identity, Work, execution, and attempt; restart kills only an exact match before reclaiming the lease |
 | Worker forges a park or stale checkpoint | Attempt-private control mount; schema and Work/execution/attempt/profile binding validated before `parked` is committed |

@@ -78,6 +78,9 @@ These are not SemVer surfaces and not architecture. Canon for commits is `CONTRI
 | F35 | Live park commits only after a validated attempt checkpoint; abort tears down the process group and records `aborted`, never `parked` | worker, application, and store tests | enforced |
 | F36 | Resume and operator input continue the same Work and execution with a fresh attempt id | application, store, and CLI tests | enforced |
 | F37 | Daemon startup reclaims every unconfirmed active lease before accepting controls | store and CLI tests | enforced |
+| F38 | Runtime roots/images are digest-verified; user Workers have finite resources, mandatory seccomp, no capabilities, and no direct network | profile and Worker adapter tests | enforced |
+| F39 | Worker-writable control artifacts and Workengine store/workspace files are opened without following symlinks | store, Worker, and workspace adapter tests | enforced |
+| F40 | Untrusted goal/input/output/artifact text is data and cannot select a Work transition; observable child output remains payload-free | application, Worker, HTTP, and CLI tests | enforced |
 
 ## How to add a check
 

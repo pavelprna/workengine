@@ -14,6 +14,7 @@
 | [0009](0009-local-operator-launch.md) | Local operator launch through the foreground control path | Accepted |
 | [0010](0010-observable-execution-projection.md) | Observable execution projection | Accepted |
 | [0011](0011-live-operator-daemon.md) | Local daemon owns lifecycle supervision | Accepted |
+| [0012](0012-deny-by-default-worker-policy.md) | Deny-by-default Worker policy and brokered egress | Accepted |
 
 Status values: Proposed, Accepted, Superseded, Deprecated.
 

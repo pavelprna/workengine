@@ -86,6 +86,7 @@ Agent and tracker names stay in configuration and adapters, not in the core.
 | `abort --work <id>` | Tear down running Work without treating it as parked |
 | `answer --work <id> --answer "<text>"` | Record an answer and resume the same Work |
 | `consent --work <id> --action "<text>"` | Record explicit consent and resume the same Work |
+| `digest-rootfs --rootfs <path>` | Calculate a Bubblewrap runtime tree digest |
 | `serve [--port 9410]` | Run the localhost daemon, Web operator, and observer |
 | `version` | Print `workengine <semver>` |
 
@@ -121,7 +122,16 @@ vendor `if` in the core.
 argv = ["my-agent", "--print"]
 retry_limit = 2
 checkout = "/src"
-sandbox = { type = "bubblewrap", rootfs = "/opt/workengine/rootfs" }
+sandbox = { type = "bubblewrap", rootfs = "/opt/workengine/rootfs", digest = "sha256:<64 lowercase hex>", seccomp = "/etc/workengine/worker.bpf", seccomp_digest = "sha256:<64 lowercase hex>" }
+
+[profile.coder.policy]
+memory_bytes = 1073741824
+max_processes = 64
+max_open_files = 256
+max_file_bytes = 1073741824
+cpu_seconds = 900
+# Optional. Without this, the Worker has no egress capability.
+# egress_broker_socket = "/run/workengine/egress.sock"
 
 [profile.coder.secret_file]
 API_TOKEN = { fromEnv = "API_TOKEN" }
@@ -130,9 +140,17 @@ API_TOKEN = { fromEnv = "API_TOKEN" }
 Secrets are references (`fromEnv`), never inline values. The Worker receives
 only a transient read-only path in `API_TOKEN_FILE`, never a secret value in
 its environment. A user Worker also
-needs an explicit `bubblewrap` runtime root or digest-pinned `oci` image;
-profiles without a sandbox fail closed. A broken profile does not block Work
-that uses a different one.
+needs an explicit verified `bubblewrap` runtime root or digest-pinned `oci`
+image and a seccomp profile; profiles without them fail closed. Use
+`workengine digest-rootfs --rootfs /opt/workengine/rootfs` to calculate the
+Bubblewrap digest. `seccomp_digest` is the ordinary SHA-256 of the seccomp file
+bytes. Bubblewrap consumes a compiled BPF seccomp program; OCI consumes the
+engine's JSON seccomp profile. Resource limits have finite
+defaults and can be tightened or explicitly changed in the policy table. Both
+backends drop every capability and have no direct network. Networked harnesses
+must speak to the explicitly mounted Unix broker socket named by
+`WORKENGINE_EGRESS_SOCKET`. A broken profile does not block Work that uses a
+different one.
 
 ## What this is not
 

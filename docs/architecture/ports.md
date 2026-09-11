@@ -28,7 +28,10 @@ Behaviour: [workflow.md](../spec/workflow.md) (persistence: atomic status+event,
 
 ## WorkerRunner
 
-Spawns a Worker process, waits, enforces budget and hang detection, returns a typed outcome.
+Spawns a Worker process, verifies its runtime digest and deny-by-default
+permission profile, applies resource/seccomp/capability and brokered-egress
+containment, waits, enforces budget and hang detection, and returns a typed
+outcome.
 
 | First adapter | Next |
 | --- | --- |
