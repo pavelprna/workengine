@@ -88,7 +88,7 @@ impl ProcessWorkerRunner {
 }
 
 impl WorkerRunner for ProcessWorkerRunner {
-    fn run(&self, request: &RunRequest<'_>) -> Result<Outcome, AppError> {
+    fn run(&self, request: &mut RunRequest<'_>) -> Result<Outcome, AppError> {
         let profile = request.work.attributes().worker_profile();
         fs::create_dir_all(request.workspace_root).map_err(AppError::worker)?;
         let secrets = SecretDirectory::create(&self.secret_files)?;
@@ -96,7 +96,7 @@ impl WorkerRunner for ProcessWorkerRunner {
             request.workspace_root,
             secrets.as_ref().map(SecretDirectory::path),
         )?;
-        match spawn_supervised(cmd, request.work.id().as_str(), request.budget) {
+        match spawn_supervised(cmd, request) {
             Ok(ChildWait::Exited { .. }) => read_or_fail(request.workspace_root, profile),
             Ok(ChildWait::BudgetExceeded) => persist_timed_out(request.workspace_root, profile),
             Err(_) => Err(AppError::Channel(ChannelReaction::Fail)),
@@ -257,7 +257,8 @@ fn persist_timed_out(root: &Path, profile: &str) -> Result<Outcome, AppError> {
 mod tests {
     use super::*;
     use std::time::Duration;
-    use workengine_domain::{Work, WorkAttributes, WorkId};
+    use workengine_application::DiscardAttemptRecorder;
+    use workengine_domain::{AttemptId, ExecutionId, Work, WorkAttributes, WorkId};
 
     fn work() -> Work {
         Work::new(
@@ -266,6 +267,25 @@ mod tests {
             1,
         )
         .unwrap()
+    }
+
+    fn run(
+        runner: &ProcessWorkerRunner,
+        work: &Work,
+        workspace_root: &Path,
+        budget: Duration,
+    ) -> Result<Outcome, AppError> {
+        let execution_id = ExecutionId::parse("execution-test").unwrap();
+        let attempt_id = AttemptId::parse("attempt-test").unwrap();
+        let mut recorder = DiscardAttemptRecorder;
+        runner.run(&mut RunRequest {
+            work,
+            execution_id: &execution_id,
+            attempt_id: &attempt_id,
+            workspace_root,
+            budget,
+            recorder: &mut recorder,
+        })
     }
 
     fn sandbox(root: &tempfile::TempDir) -> Sandbox {
@@ -307,13 +327,7 @@ mod tests {
         )
         .unwrap();
         let work = work();
-        let outcome = runner
-            .run(&RunRequest {
-                work: &work,
-                workspace_root: dir.path(),
-                budget: Duration::from_secs(2),
-            })
-            .unwrap();
+        let outcome = run(&runner, &work, dir.path(), Duration::from_secs(2)).unwrap();
         assert_eq!(outcome.kind(), OutcomeKind::Failed);
         assert!(!dir.path().join("outcome.json").exists());
     }
@@ -339,13 +353,7 @@ mod tests {
         )
         .unwrap();
         let work = work();
-        let outcome = runner
-            .run(&RunRequest {
-                work: &work,
-                workspace_root: dir.path(),
-                budget: Duration::from_secs(2),
-            })
-            .unwrap();
+        let outcome = run(&runner, &work, dir.path(), Duration::from_secs(2)).unwrap();
         assert_eq!(outcome.kind(), OutcomeKind::Succeeded);
     }
 
@@ -373,13 +381,7 @@ mod tests {
         )
         .unwrap();
         let work = work();
-        let _ = runner
-            .run(&RunRequest {
-                work: &work,
-                workspace_root: dir.path(),
-                budget: Duration::from_secs(2),
-            })
-            .unwrap();
+        let _ = run(&runner, &work, dir.path(), Duration::from_secs(2)).unwrap();
         let leaked = fs::read_to_string(dir.path().join("leaked.txt")).unwrap();
         assert!(
             leaked.trim().is_empty(),
@@ -409,13 +411,7 @@ mod tests {
         )
         .unwrap();
         let work = work();
-        let _ = runner
-            .run(&RunRequest {
-                work: &work,
-                workspace_root: dir.path(),
-                budget: Duration::from_secs(2),
-            })
-            .unwrap();
+        let _ = run(&runner, &work, dir.path(), Duration::from_secs(2)).unwrap();
         let got = fs::read_to_string(dir.path().join("ok.txt")).unwrap();
         assert_eq!(got.trim(), "visible");
     }

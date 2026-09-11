@@ -70,7 +70,7 @@ struct OutcomeDto {
 }
 
 impl WorkerRunner for StubWorkerRunner {
-    fn run(&self, request: &RunRequest<'_>) -> Result<Outcome, AppError> {
+    fn run(&self, request: &mut RunRequest<'_>) -> Result<Outcome, AppError> {
         let profile = request.work.attributes().worker_profile();
         match self.behavior {
             StubBehavior::Hang => run_hang(request, profile),
@@ -112,7 +112,7 @@ pub fn encode_outcome(outcome: &Outcome) -> Result<String, AppError> {
 }
 
 fn run_writer(
-    request: &RunRequest<'_>,
+    request: &mut RunRequest<'_>,
     kind: OutcomeKind,
     profile: &str,
 ) -> Result<Outcome, AppError> {
@@ -126,7 +126,7 @@ fn run_writer(
     cmd.arg("-c")
         .arg("cp .outcome-payload.json outcome.json && printf '%s\\n' stub")
         .current_dir(request.workspace_root);
-    match spawn_supervised(cmd, request.work.id().as_str(), request.budget)? {
+    match spawn_supervised(cmd, request)? {
         ChildWait::Exited { success: true } => {
             decode_outcome(&fs::read(&dest).map_err(AppError::worker)?)
         }
@@ -146,13 +146,13 @@ fn persist_outcome(root: &Path, kind: OutcomeKind, profile: &str) -> Result<Outc
     Ok(outcome)
 }
 
-fn run_budget(request: &RunRequest<'_>, profile: &str) -> Result<Outcome, AppError> {
+fn run_budget(request: &mut RunRequest<'_>, profile: &str) -> Result<Outcome, AppError> {
     fs::create_dir_all(request.workspace_root).map_err(AppError::worker)?;
     let mut cmd = Command::new("sh");
     cmd.arg("-c")
         .arg("exec sleep 30")
         .current_dir(request.workspace_root);
-    match spawn_supervised(cmd, request.work.id().as_str(), request.budget)? {
+    match spawn_supervised(cmd, request)? {
         ChildWait::BudgetExceeded => {
             persist_outcome(request.workspace_root, OutcomeKind::BudgetExceeded, profile)
         }
@@ -160,13 +160,13 @@ fn run_budget(request: &RunRequest<'_>, profile: &str) -> Result<Outcome, AppErr
     }
 }
 
-fn run_hang(request: &RunRequest<'_>, profile: &str) -> Result<Outcome, AppError> {
+fn run_hang(request: &mut RunRequest<'_>, profile: &str) -> Result<Outcome, AppError> {
     fs::create_dir_all(request.workspace_root).map_err(AppError::worker)?;
     let mut cmd = Command::new("sh");
     cmd.arg("-c")
         .arg("sleep 30 & echo $! > child.pid; exec sleep 30")
         .current_dir(request.workspace_root);
-    match spawn_supervised(cmd, request.work.id().as_str(), request.budget)? {
+    match spawn_supervised(cmd, request)? {
         ChildWait::BudgetExceeded => {
             persist_outcome(request.workspace_root, OutcomeKind::TimedOut, profile)
         }
@@ -178,7 +178,8 @@ fn run_hang(request: &RunRequest<'_>, profile: &str) -> Result<Outcome, AppError
 mod tests {
     use super::*;
     use std::time::Duration;
-    use workengine_domain::{Work, WorkAttributes, WorkId};
+    use workengine_application::{AttemptRecorder, DiscardAttemptRecorder, ProcessEvent};
+    use workengine_domain::{AttemptId, ExecutionId, Work, WorkAttributes, WorkId};
 
     fn work() -> Work {
         Work::new(
@@ -189,18 +190,31 @@ mod tests {
         .unwrap()
     }
 
+    fn run(
+        runner: &impl WorkerRunner,
+        work: &Work,
+        workspace_root: &Path,
+        budget: Duration,
+    ) -> Result<Outcome, AppError> {
+        let execution_id = ExecutionId::parse("execution-test").unwrap();
+        let attempt_id = AttemptId::parse("attempt-test").unwrap();
+        let mut recorder = DiscardAttemptRecorder;
+        runner.run(&mut RunRequest {
+            work,
+            execution_id: &execution_id,
+            attempt_id: &attempt_id,
+            workspace_root,
+            budget,
+            recorder: &mut recorder,
+        })
+    }
+
     #[test]
     fn stub_writes_schema_valid_outcome() {
         let dir = tempfile::tempdir().unwrap();
         let runner = StubWorkerRunner::new(StubBehavior::Succeed);
         let work = work();
-        let outcome = runner
-            .run(&RunRequest {
-                work: &work,
-                workspace_root: dir.path(),
-                budget: Duration::from_secs(2),
-            })
-            .unwrap();
+        let outcome = run(&runner, &work, dir.path(), Duration::from_secs(2)).unwrap();
         assert_eq!(outcome.kind(), OutcomeKind::Succeeded);
         decode_outcome(&fs::read(dir.path().join("outcome.json")).unwrap()).unwrap();
     }
@@ -224,13 +238,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let runner = StubWorkerRunner::new(StubBehavior::Hang);
         let work = work();
-        let outcome = runner
-            .run(&RunRequest {
-                work: &work,
-                workspace_root: dir.path(),
-                budget: Duration::from_millis(80),
-            })
-            .unwrap();
+        let outcome = run(&runner, &work, dir.path(), Duration::from_millis(80)).unwrap();
         assert_eq!(outcome.kind(), OutcomeKind::TimedOut);
         let child_pid: i32 = fs::read_to_string(dir.path().join("child.pid"))
             .unwrap()
@@ -247,13 +255,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let runner = StubWorkerRunner::new(StubBehavior::ExceedBudget);
         let work = work();
-        let outcome = runner
-            .run(&RunRequest {
-                work: &work,
-                workspace_root: dir.path(),
-                budget: Duration::from_millis(80),
-            })
-            .unwrap();
+        let outcome = run(&runner, &work, dir.path(), Duration::from_millis(80)).unwrap();
         assert_eq!(outcome.kind(), OutcomeKind::BudgetExceeded);
         let loaded = decode_outcome(&fs::read(dir.path().join("outcome.json")).unwrap()).unwrap();
         assert_eq!(loaded.kind(), OutcomeKind::BudgetExceeded);
@@ -286,6 +288,63 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&with_payload).unwrap();
         assert_eq!(v["payload"], "stub");
         assert_eq!(v["workId"], "work-1");
+    }
+
+    #[derive(Default)]
+    struct CollectRecorder {
+        events: Vec<ProcessEvent>,
+    }
+
+    impl AttemptRecorder for CollectRecorder {
+        fn heartbeat_attempt(
+            &mut self,
+            _work_id: &WorkId,
+            _execution_id: &ExecutionId,
+            _attempt_id: &AttemptId,
+            _observed_at_unix_ms: u64,
+        ) -> Result<(), AppError> {
+            Ok(())
+        }
+
+        fn record_process_event(
+            &mut self,
+            _work_id: &WorkId,
+            _execution_id: &ExecutionId,
+            _attempt_id: &AttemptId,
+            event: ProcessEvent,
+            _observed_at_unix_ms: u64,
+        ) -> Result<(), AppError> {
+            self.events.push(event);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn supervised_process_reports_payload_free_event_kinds() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = StubWorkerRunner::new(StubBehavior::Succeed);
+        let work = work();
+        let execution_id = ExecutionId::parse("execution-recorded").unwrap();
+        let attempt_id = AttemptId::parse("attempt-recorded").unwrap();
+        let mut recorder = CollectRecorder::default();
+        runner
+            .run(&mut RunRequest {
+                work: &work,
+                execution_id: &execution_id,
+                attempt_id: &attempt_id,
+                workspace_root: dir.path(),
+                budget: Duration::from_secs(2),
+                recorder: &mut recorder,
+            })
+            .unwrap();
+        assert_eq!(
+            recorder.events,
+            vec![
+                ProcessEvent::Spawned,
+                ProcessEvent::ChildStdout,
+                ProcessEvent::Exited,
+            ]
+        );
     }
 
     #[test]
@@ -321,13 +380,7 @@ mod tests {
             1,
         )
         .unwrap();
-        let outcome = runner
-            .run(&RunRequest {
-                work: &work,
-                workspace_root: dir.path(),
-                budget: Duration::from_secs(2),
-            })
-            .unwrap();
+        let outcome = run(&runner, &work, dir.path(), Duration::from_secs(2)).unwrap();
         assert_eq!(outcome.kind(), OutcomeKind::Succeeded);
         assert_eq!(outcome.worker_profile(), "stub's \"quoted\"");
         let loaded = decode_outcome(&fs::read(dir.path().join("outcome.json")).unwrap()).unwrap();
@@ -338,22 +391,29 @@ mod tests {
     fn channel_behaviors_are_classified_not_prose() {
         let dir = tempfile::tempdir().unwrap();
         let work = work();
-        let request = RunRequest {
-            work: &work,
-            workspace_root: dir.path(),
-            budget: Duration::from_secs(1),
-        };
-        let fail = StubWorkerRunner::new(StubBehavior::ChannelFail)
-            .run(&request)
-            .unwrap_err();
+        let fail = run(
+            &StubWorkerRunner::new(StubBehavior::ChannelFail),
+            &work,
+            dir.path(),
+            Duration::from_secs(1),
+        )
+        .unwrap_err();
         assert!(matches!(err_channel(&fail), ChannelReaction::Fail));
-        let park = StubWorkerRunner::new(StubBehavior::ChannelPark)
-            .run(&request)
-            .unwrap_err();
+        let park = run(
+            &StubWorkerRunner::new(StubBehavior::ChannelPark),
+            &work,
+            dir.path(),
+            Duration::from_secs(1),
+        )
+        .unwrap_err();
         assert!(matches!(err_channel(&park), ChannelReaction::Park));
-        let retry = StubWorkerRunner::new(StubBehavior::ChannelRetry)
-            .run(&request)
-            .unwrap_err();
+        let retry = run(
+            &StubWorkerRunner::new(StubBehavior::ChannelRetry),
+            &work,
+            dir.path(),
+            Duration::from_secs(1),
+        )
+        .unwrap_err();
         assert!(matches!(err_channel(&retry), ChannelReaction::Retry));
     }
 
