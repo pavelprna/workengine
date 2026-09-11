@@ -61,7 +61,7 @@ export function AppShell() {
         <div className="sidebar-note">
           <Activity size={15} />
           <p>
-            Local-first observer. Execution controls are intentionally offline.
+            Local-first control plane. Launch is explicit and lease-protected.
           </p>
         </div>
         <RuntimeState />

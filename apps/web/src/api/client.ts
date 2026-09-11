@@ -127,4 +127,26 @@ export const api = {
       },
     });
   },
+  useStartWork: () => {
+    const queryClient = useQueryClient();
+    return useMutation({
+      mutationFn: async (workId: string) => {
+        const { data, error } = await client.POST(
+          "/api/v0/works/{workId}/start",
+          { params: { path: { workId } } },
+        );
+        if (!data)
+          throw new Error(errorMessage(error, "The task could not be started"));
+        return data;
+      },
+      onSuccess: (work) => {
+        queryClient.setQueryData(["work", work.workId], work);
+        void queryClient.invalidateQueries({ queryKey: ["overview"] });
+        void queryClient.invalidateQueries({ queryKey: ["works"] });
+        void queryClient.invalidateQueries({
+          queryKey: ["events", work.workId],
+        });
+      },
+    });
+  },
 };

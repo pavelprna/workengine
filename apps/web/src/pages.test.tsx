@@ -107,6 +107,13 @@ beforeEach(() => {
     if (url.pathname === "/api/v0/works" && method === "POST") {
       return response(work("work-new", "created from browser"), 201);
     }
+    if (url.pathname === "/api/v0/works/work-new/start" && method === "POST") {
+      return response({
+        ...work("work-new", "created from browser", "succeeded"),
+        outcomeKind: "succeeded",
+        workspaceBound: true,
+      });
+    }
     if (url.pathname === "/api/v0/works/work-new") {
       return response(work("work-new", "created from browser"));
     }
@@ -218,3 +225,26 @@ test.serial("detail renders the chronological event timeline", async () => {
   expect(screen.getByText(/event #1/)).toBeTruthy();
   expect(screen.getByText(/event #2/)).toBeTruthy();
 });
+
+test.serial(
+  "ready Work can be explicitly started from its record",
+  async () => {
+    const router = createAppRouter();
+    await router.navigate({
+      to: "/works/$workId",
+      params: { workId: "work-new" },
+    });
+    renderApp(router);
+    await screen.findByRole("heading", { name: "created from browser" });
+
+    await userEvent.click(screen.getByRole("button", { name: "Start Work" }));
+
+    await screen.findByText("Execution is confirmed");
+    expect(
+      requests.some(
+        ({ method, url }) =>
+          method === "POST" && url.pathname === "/api/v0/works/work-new/start",
+      ),
+    ).toBe(true);
+  },
+);

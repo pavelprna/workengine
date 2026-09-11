@@ -15,6 +15,7 @@ import {
   FileClock,
   Filter,
   ListFilter,
+  Play,
   Plus,
   Radio,
   RefreshCw,
@@ -160,8 +161,8 @@ function NewWorkForm() {
       </div>
       <h2 id="new-work-title">Put a task in the queue</h2>
       <p className="quiet">
-        A goal and profile become durable Work immediately. Starting remains a
-        CLI-only action.
+        A goal and profile become durable Work immediately. Launch it explicitly
+        from its record when you are ready.
       </p>
       <form onSubmit={submit}>
         <label htmlFor="goal">Goal</label>
@@ -207,7 +208,7 @@ export function OverviewPage() {
   return (
     <>
       <header className="page-header overview-header">
-        <p className="eyebrow">LOCAL CONTROL PLANE · v0.1</p>
+        <p className="eyebrow">LOCAL CONTROL PLANE · v0.3</p>
         <h1>Make the queue visible.</h1>
         <p className="lede">
           Durable Work is the record. This operator surface is only a window
@@ -256,8 +257,8 @@ export function OverviewPage() {
           </div>
           <strong>localhost only</strong>
           <p>
-            Observe and create are available. Execution stays with the
-            foreground CLI.
+            Observe, create, and explicit start are available. Execution
+            settings stay on the local host.
           </p>
         </div>
       </section>
@@ -455,6 +456,7 @@ export function WorkDetailPage() {
   const { workId } = useParams({ from: workRoute.id });
   const work = api.useWork(workId);
   const events = api.useEvents(workId);
+  const startWork = api.useStartWork();
   const allEvents = events.data?.pages.flatMap((page) => page.items) ?? [];
 
   if (work.isPending)
@@ -484,6 +486,39 @@ export function WorkDetailPage() {
         </div>
         <StatusBadge status={work.data.status} />
       </header>
+      <section className="launch-strip" aria-label="Execution control">
+        <div>
+          <p className="panel-kicker">OPERATOR LAUNCH · v0.3</p>
+          <strong>
+            {work.data.status === "ready" || work.data.status === "parked"
+              ? "Ready for an explicit start"
+              : work.data.status === "running"
+                ? "An attempt owns this Work"
+                : "Execution is confirmed"}
+          </strong>
+          <p>
+            The persisted profile supplies the runtime. No command, secret, or
+            workspace setting comes from this browser.
+          </p>
+          {startWork.isError && (
+            <p className="form-error" role="alert">
+              {startWork.error.message}
+            </p>
+          )}
+        </div>
+        <button
+          className="launch-action"
+          disabled={
+            startWork.isPending ||
+            (work.data.status !== "ready" && work.data.status !== "parked")
+          }
+          onClick={() => startWork.mutate(workId)}
+          type="button"
+        >
+          <Play size={16} fill="currentColor" />
+          {startWork.isPending ? "Attempt running…" : "Start Work"}
+        </button>
+      </section>
       <section className="fact-grid" aria-label="Work facts">
         <div>
           <span>WORK ID</span>
@@ -577,7 +612,7 @@ export function DoctorPage() {
           <ShieldCheck size={20} />
           <span>LISTENER</span>
           <strong>localhost</strong>
-          <p>No remote bind or authentication in v0.1.</p>
+          <p>No remote bind or authentication in v0.3.</p>
         </div>
       </section>
       {health.isError && (
@@ -592,7 +627,7 @@ export function DoctorPage() {
       >
         <div className="section-heading">
           <div>
-            <p className="panel-kicker">V0.1 CAPABILITIES</p>
+            <p className="panel-kicker">V0.3 CAPABILITIES</p>
             <h2 id="capability-title">What this surface may do</h2>
           </div>
           {health.data && <code>{health.data.version}</code>}
@@ -607,7 +642,11 @@ export function DoctorPage() {
             <dd className="yes">yes</dd>
           </div>
           <div>
-            <dt>Start, park or abort Work</dt>
+            <dt>Explicitly start ready or parked Work</dt>
+            <dd className="yes">yes</dd>
+          </div>
+          <div>
+            <dt>Park or abort active Work</dt>
             <dd>not yet</dd>
           </div>
           <div>
