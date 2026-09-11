@@ -1,0 +1,155 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: dark;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  background: #0b1020;
+  color: #e8edf8;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at 80% 0%, #172a4e 0, transparent 34rem), #0b1020;
+}
+
+.shell {
+  display: grid;
+  grid-template-columns: 15rem 1fr;
+  min-height: 100vh;
+}
+
+aside {
+  border-right: 1px solid #26334e;
+  padding: 1.5rem 1rem;
+  background: rgba(8, 13, 27, 0.72);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-weight: 700;
+  letter-spacing: -0.04em;
+}
+nav {
+  display: grid;
+  gap: 0.35rem;
+  margin-top: 2.5rem;
+}
+nav a {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0.65rem 0.75rem;
+  border-radius: 0.45rem;
+  color: #aab7d1;
+  text-decoration: none;
+  font-size: 0.85rem;
+}
+nav a.active,
+nav a:hover {
+  background: #17233b;
+  color: #fff;
+}
+.soon {
+  margin-left: auto;
+  font-size: 0.65rem;
+  color: #657390;
+}
+.content {
+  max-width: 68rem;
+  padding: 4rem clamp(1.5rem, 5vw, 5rem);
+}
+.eyebrow {
+  margin: 0;
+  color: #76d7c4;
+  font-size: 0.72rem;
+  letter-spacing: 0.14em;
+  font-weight: 700;
+}
+h1 {
+  margin: 0.55rem 0 2.5rem;
+  font-size: clamp(2rem, 4vw, 3.4rem);
+  letter-spacing: -0.07em;
+}
+h2 {
+  margin-top: 0;
+  letter-spacing: -0.035em;
+}
+.card,
+.placeholder {
+  max-width: 42rem;
+  padding: 1.4rem;
+  border: 1px solid #2e415f;
+  border-radius: 0.75rem;
+  background: rgba(18, 29, 50, 0.72);
+  box-shadow: 0 1rem 3rem rgba(0, 0, 0, 0.15);
+}
+.health-title {
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+  color: #76d7c4;
+  font-weight: 700;
+}
+dl {
+  display: grid;
+  gap: 0.8rem;
+  margin: 1.5rem 0 0;
+}
+dl div {
+  display: flex;
+  justify-content: space-between;
+  gap: 2rem;
+  border-top: 1px solid #2c3b56;
+  padding-top: 0.8rem;
+}
+dt {
+  color: #9aa9c7;
+}
+dd {
+  margin: 0;
+  color: #f3f7ff;
+}
+.muted {
+  color: #aab7d1;
+}
+.error {
+  border-color: #a65c67;
+}
+button {
+  border: 0;
+  border-radius: 0.4rem;
+  padding: 0.55rem 0.8rem;
+  background: #76d7c4;
+  color: #07120f;
+  font: inherit;
+  cursor: pointer;
+}
+
+@media (max-width: 700px) {
+  .shell {
+    grid-template-columns: 1fr;
+  }
+  aside {
+    border-right: 0;
+    border-bottom: 1px solid #26334e;
+  }
+  nav {
+    display: flex;
+    margin-top: 1.2rem;
+  }
+  nav a {
+    flex: 1;
+  }
+  .content {
+    padding-top: 2.5rem;
+  }
+}

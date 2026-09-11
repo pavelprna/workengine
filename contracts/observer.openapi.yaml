@@ -1,0 +1,105 @@
+openapi: 3.1.0
+info:
+  title: Workengine Observer API
+  version: 0.1.0-internal
+  description: Localhost-only, read-only observer API. Internal until a public v1 is explicitly adopted.
+paths:
+  /api/v0/health:
+    get:
+      operationId: getHealth
+      responses:
+        '200': { description: Healthy observer, content: { application/json: { schema: { $ref: '#/components/schemas/Health' } } } }
+  /api/v0/works:
+    get:
+      operationId: listWorks
+      parameters:
+        - { name: status, in: query, schema: { type: string, enum: [ready, running, succeeded, failed, parked] } }
+        - { name: profile, in: query, schema: { type: string } }
+        - { name: cursor, in: query, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 50 } }
+      responses:
+        '200': { description: Work page, content: { application/json: { schema: { $ref: '#/components/schemas/WorkPage' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+  /api/v0/works/{workId}:
+    get:
+      operationId: getWork
+      parameters:
+        - { name: workId, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Work snapshot, content: { application/json: { schema: { $ref: '#/components/schemas/WorkSnapshot' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/v0/events:
+    get:
+      operationId: listEvents
+      parameters:
+        - { name: after, in: query, schema: { type: string, pattern: '^[0-9]+$', default: '0' } }
+        - { name: workId, in: query, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 50 } }
+      responses:
+        '200': { description: Event page, content: { application/json: { schema: { $ref: '#/components/schemas/EventPage' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+  /api/v0/events/stream:
+    get:
+      operationId: streamEvents
+      parameters:
+        - { name: after, in: query, schema: { type: string, pattern: '^[0-9]+$', default: '0' } }
+        - { name: workId, in: query, schema: { type: string } }
+      responses:
+        '200':
+          description: Server-sent events. `id` and `cursor` are the same decimal event sequence.
+          content:
+            text/event-stream: { schema: { type: string } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+components:
+  responses:
+    BadRequest: { description: Invalid request, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    NotFound: { description: Resource not found, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+  schemas:
+    Health:
+      type: object
+      required: [status, version, store]
+      properties:
+        status: { type: string, const: ok }
+        version: { type: string }
+        store: { type: string, const: readable }
+    WorkSnapshot:
+      type: object
+      required: [workId, status, goal, workerProfile, createdAtUnixMs, workspaceBound]
+      properties:
+        workId: { type: string }
+        status: { type: string, enum: [ready, running, succeeded, failed, parked] }
+        goal: { type: string }
+        workerProfile: { type: string }
+        createdAtUnixMs: { type: string, pattern: '^[0-9]+$' }
+        outcomeKind: { type: [string, 'null'] }
+        workspaceBound: { type: boolean }
+    WorkPage:
+      type: object
+      required: [items, nextCursor]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/WorkSnapshot' } }
+        nextCursor: { type: [string, 'null'] }
+    Event:
+      type: object
+      required: [cursor, workId, kind, to, createdAtUnixMs]
+      properties:
+        cursor: { type: string, pattern: '^[0-9]+$' }
+        workId: { type: string }
+        kind: { type: string, enum: [created, started, completed, parked] }
+        from: { type: [string, 'null'] }
+        to: { type: string, enum: [ready, running, succeeded, failed, parked] }
+        outcomeKind: { type: [string, 'null'] }
+        createdAtUnixMs: { type: string, pattern: '^[0-9]+$' }
+    EventPage:
+      type: object
+      required: [items, nextCursor]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/Event' } }
+        nextCursor: { type: [string, 'null'] }
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string }
+        message: { type: string }

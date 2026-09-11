@@ -1,0 +1,9 @@
+{
+  "name": "workengine-web-workspace",
+  "private": true,
+  "workspaces": ["apps/*"],
+  "scripts": {
+    "web:check": "bun run --cwd apps/web check",
+    "web:build": "bun run --cwd apps/web build"
+  }
+}

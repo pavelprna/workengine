@@ -6,6 +6,12 @@ target/
 **/mutants.out*/
 rustc-ice-*.txt
 
+# Bun / Vite build products. The lockfile is tracked.
+node_modules/
+apps/web/dist/
+apps/web/src/api/generated.ts
+apps/web/tsconfig.tsbuildinfo
+
 # Keep Cargo.lock: this repository ships a binary, not a library.
 
 # Editors and local tooling

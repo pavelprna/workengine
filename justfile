@@ -7,7 +7,14 @@ default:
     @just --list
 
 # Format, lint, test, and cargo-deny. Mandatory before finishing a change.
-check: fmt-check clippy test deny
+check: web-check fmt-check clippy test deny
+
+# The Web UI is a Bun workspace package. `bun.lock` makes this reproducible.
+web-install:
+    bun install --frozen-lockfile
+
+web-check: web-install
+    bun run --cwd apps/web check
 
 fmt:
     cargo fmt --all
