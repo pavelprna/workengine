@@ -10,6 +10,7 @@
 | [0005](0005-sandboxed-attempt-protocol.md) | Sandboxed attempt protocol | Accepted |
 | [0006](0006-local-observer-boundary.md) | Local Web observer boundary | Partially superseded by 0007 |
 | [0007](0007-local-operator-intake.md) | Local operator intake before live control | Accepted |
+| [0008](0008-execution-attempt-identity.md) | Execution and attempt identity | Accepted |
 
 Status values: Proposed, Accepted, Superseded, Deprecated.
 
