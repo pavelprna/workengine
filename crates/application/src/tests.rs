@@ -5,15 +5,15 @@ use std::time::Duration;
 
 use workengine_domain::{
     AttemptId, ChannelPolicy, ConfirmedOutcome, ContentDigest, EXECUTION_SPEC_SCHEMA_VERSION,
-    ExecutionId, ExecutionSpec, OUTCOME_SCHEMA_VERSION, Outcome, OutcomeKind, Work, WorkEvent,
-    WorkId, WorkStatus,
+    ExecutionId, ExecutionSpec, OUTCOME_SCHEMA_VERSION, Outcome, OutcomeKind, RuntimeKind, Work,
+    WorkEvent, WorkId, WorkStatus,
 };
 
 use crate::clock::Clock;
 use crate::error::{AppError, ChannelReaction};
 use crate::ports::{
-    AttemptClaim, BindRequest, RunRequest, SequencedEvent, StartRequest, WorkQuery, WorkStore,
-    WorkerRunner, WorkspaceFactory,
+    AttemptClaim, AttemptRecorder, BindRequest, ExecutionObservation, ProcessEvent, RunRequest,
+    SequencedEvent, StartRequest, WorkQuery, WorkStore, WorkerRunner, WorkspaceFactory,
 };
 use crate::{complete, create, next, park, recover_unconfirmed, start};
 
@@ -71,6 +71,33 @@ impl WorkQuery for FakeStore {
                 event: event.clone(),
             })
             .collect())
+    }
+
+    fn executions(&self, _id: &WorkId) -> Result<Vec<ExecutionObservation>, AppError> {
+        Ok(Vec::new())
+    }
+}
+
+impl AttemptRecorder for FakeStore {
+    fn heartbeat_attempt(
+        &mut self,
+        _work_id: &WorkId,
+        _execution_id: &ExecutionId,
+        _attempt_id: &AttemptId,
+        _observed_at_unix_ms: u64,
+    ) -> Result<(), AppError> {
+        Ok(())
+    }
+
+    fn record_process_event(
+        &mut self,
+        _work_id: &WorkId,
+        _execution_id: &ExecutionId,
+        _attempt_id: &AttemptId,
+        _event: ProcessEvent,
+        _observed_at_unix_ms: u64,
+    ) -> Result<(), AppError> {
+        Ok(())
     }
 }
 
@@ -223,7 +250,7 @@ impl FakeRunner {
 }
 
 impl WorkerRunner for FakeRunner {
-    fn run(&self, request: &RunRequest<'_>) -> Result<Outcome, AppError> {
+    fn run(&self, request: &mut RunRequest<'_>) -> Result<Outcome, AppError> {
         self.runs.set(self.runs.get() + 1);
         Outcome::new(
             OUTCOME_SCHEMA_VERSION,
@@ -282,6 +309,7 @@ fn execution_spec(id: &WorkId, retry_limit: u32) -> ExecutionSpec {
         id.clone(),
         "stub",
         ContentDigest::parse(format!("sha256:{}", "1".repeat(64))).unwrap(),
+        RuntimeKind::Stub,
         ContentDigest::parse(format!("sha256:{}", "2".repeat(64))).unwrap(),
         BUDGET.as_millis() as u64,
         retry_limit,
@@ -591,7 +619,7 @@ fn started_and_completed_events_use_clock_not_work_birth() {
 struct BoomRunner;
 
 impl WorkerRunner for BoomRunner {
-    fn run(&self, _request: &RunRequest<'_>) -> Result<Outcome, AppError> {
+    fn run(&self, _request: &mut RunRequest<'_>) -> Result<Outcome, AppError> {
         Err(AppError::worker("spawn failed"))
     }
 
@@ -619,7 +647,7 @@ struct ChannelRunner {
 }
 
 impl WorkerRunner for ChannelRunner {
-    fn run(&self, request: &RunRequest<'_>) -> Result<Outcome, AppError> {
+    fn run(&self, request: &mut RunRequest<'_>) -> Result<Outcome, AppError> {
         let i = self.runs.get() as usize;
         self.runs.set(self.runs.get() + 1);
         if i < self.reactions.len() {

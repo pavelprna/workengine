@@ -79,11 +79,15 @@ pub fn start(
                 outcome,
             );
         }
-        match runner.run(&RunRequest {
+        let result = runner.run(&mut RunRequest {
             work: &work,
+            execution_id: &execution_id,
+            attempt_id: &attempt_id,
             workspace_root: &root,
             budget: remaining_budget,
-        }) {
+            recorder: store,
+        });
+        match result {
             Ok(outcome) => {
                 return confirm(
                     store,

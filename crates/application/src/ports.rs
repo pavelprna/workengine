@@ -15,6 +15,139 @@ pub struct SequencedEvent {
     pub event: WorkEvent,
 }
 
+/// Closed metadata-only process event set exposed to observers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProcessEvent {
+    Spawned,
+    Exited,
+    Killed,
+    ChildStdout,
+    ChildStderr,
+}
+
+impl ProcessEvent {
+    pub const ALL: [Self; 5] = [
+        Self::Spawned,
+        Self::Exited,
+        Self::Killed,
+        Self::ChildStdout,
+        Self::ChildStderr,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Spawned => "spawned",
+            Self::Exited => "exited",
+            Self::Killed => "killed",
+            Self::ChildStdout => "child_stdout",
+            Self::ChildStderr => "child_stderr",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self, AppError> {
+        match value {
+            "spawned" => Ok(Self::Spawned),
+            "exited" => Ok(Self::Exited),
+            "killed" => Ok(Self::Killed),
+            "child_stdout" => Ok(Self::ChildStdout),
+            "child_stderr" => Ok(Self::ChildStderr),
+            _ => Err(AppError::store(format!(
+                "unknown persisted process event {value}"
+            ))),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AttemptState {
+    Active,
+    Confirmed,
+    Retried,
+    Parked,
+}
+
+impl AttemptState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Confirmed => "confirmed",
+            Self::Retried => "retried",
+            Self::Parked => "parked",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self, AppError> {
+        match value {
+            "active" => Ok(Self::Active),
+            "confirmed" => Ok(Self::Confirmed),
+            "retried" => Ok(Self::Retried),
+            "parked" => Ok(Self::Parked),
+            _ => Err(AppError::store(format!(
+                "unknown persisted attempt state {value}"
+            ))),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SecretRefObservation {
+    pub name: String,
+    pub source: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecutionSpecObservation {
+    pub schema_version: u32,
+    pub worker_profile: String,
+    pub worker_config_digest: String,
+    pub runtime_kind: Option<String>,
+    pub runtime_digest: String,
+    pub wall_clock_budget_ms: u64,
+    pub retry_limit: u32,
+    pub channel_policy: String,
+    pub secret_refs: Vec<SecretRefObservation>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProcessRecordObservation {
+    pub event: ProcessEvent,
+    pub occurrences: u64,
+    pub first_observed_at_unix_ms: u64,
+    pub last_observed_at_unix_ms: u64,
+    pub payload_redacted: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConfirmedOutcomeObservation {
+    pub schema_version: u32,
+    pub kind: OutcomeKind,
+    pub worker_profile: String,
+    pub confirmed_at_unix_ms: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AttemptObservation {
+    pub attempt_id: AttemptId,
+    pub state: AttemptState,
+    pub retry_ordinal: u32,
+    pub started_at_unix_ms: u64,
+    pub last_heartbeat_at_unix_ms: u64,
+    pub finished_at_unix_ms: Option<u64>,
+    pub terminal_reason: Option<String>,
+    pub checkpoint_recorded: bool,
+    pub process_records: Vec<ProcessRecordObservation>,
+    pub confirmed_outcome: Option<ConfirmedOutcomeObservation>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecutionObservation {
+    pub execution_id: ExecutionId,
+    pub work_id: WorkId,
+    pub created_at_unix_ms: u64,
+    pub spec: ExecutionSpecObservation,
+    pub attempts: Vec<AttemptObservation>,
+}
+
 /// Read-only access to Work snapshots and their append-only history.
 ///
 /// Observers implement only this port: reads must not recover, transition, or
@@ -28,10 +161,57 @@ pub trait WorkQuery {
         after_seq: u64,
         work_id: Option<&WorkId>,
     ) -> Result<Vec<SequencedEvent>, AppError>;
+    fn executions(&self, id: &WorkId) -> Result<Vec<ExecutionObservation>, AppError>;
+}
+
+/// Live, attempt-scoped observation written only for the matching lease.
+pub trait AttemptRecorder {
+    fn heartbeat_attempt(
+        &mut self,
+        work_id: &WorkId,
+        execution_id: &ExecutionId,
+        attempt_id: &AttemptId,
+        observed_at_unix_ms: u64,
+    ) -> Result<(), AppError>;
+
+    fn record_process_event(
+        &mut self,
+        work_id: &WorkId,
+        execution_id: &ExecutionId,
+        attempt_id: &AttemptId,
+        event: ProcessEvent,
+        observed_at_unix_ms: u64,
+    ) -> Result<(), AppError>;
+}
+
+/// Recorder for adapter tests and runners used outside a claimed execution.
+pub struct DiscardAttemptRecorder;
+
+impl AttemptRecorder for DiscardAttemptRecorder {
+    fn heartbeat_attempt(
+        &mut self,
+        _work_id: &WorkId,
+        _execution_id: &ExecutionId,
+        _attempt_id: &AttemptId,
+        _observed_at_unix_ms: u64,
+    ) -> Result<(), AppError> {
+        Ok(())
+    }
+
+    fn record_process_event(
+        &mut self,
+        _work_id: &WorkId,
+        _execution_id: &ExecutionId,
+        _attempt_id: &AttemptId,
+        _event: ProcessEvent,
+        _observed_at_unix_ms: u64,
+    ) -> Result<(), AppError> {
+        Ok(())
+    }
 }
 
 /// Persists current Work status and the append-only event log.
-pub trait WorkStore: WorkQuery {
+pub trait WorkStore: WorkQuery + AttemptRecorder {
     /// Status update and event append are one operation.
     fn put(&mut self, work: &Work, event: WorkEvent) -> Result<(), AppError>;
 
@@ -95,14 +275,17 @@ pub trait WorkspaceFactory {
 
 /// Spawn, wait, record. Implementations own process groups and hang detection.
 pub trait WorkerRunner {
-    fn run(&self, request: &RunRequest<'_>) -> Result<Outcome, AppError>;
+    fn run(&self, request: &mut RunRequest<'_>) -> Result<Outcome, AppError>;
     fn decode(&self, bytes: &[u8]) -> Result<Outcome, AppError>;
 }
 
 pub struct RunRequest<'a> {
     pub work: &'a Work,
+    pub execution_id: &'a ExecutionId,
+    pub attempt_id: &'a AttemptId,
     pub workspace_root: &'a Path,
     pub budget: Duration,
+    pub recorder: &'a mut dyn AttemptRecorder,
 }
 
 /// Inputs for `start` that are not ports.
