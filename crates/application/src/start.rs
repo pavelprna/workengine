@@ -8,8 +8,8 @@ use workengine_domain::{
 use crate::clock::Clock;
 use crate::error::{AppError, ChannelReaction};
 use crate::ports::{
-    AttemptClaim, AttemptState, BindRequest, RunRequest, StartRequest, WorkStore, WorkerExit,
-    WorkerRunner, WorkspaceFactory,
+    AttemptClaim, AttemptPark, AttemptState, BindRequest, RunRequest, StartRequest, WorkStore,
+    WorkerExit, WorkerRunner, WorkspaceFactory,
 };
 
 /// Claim an attempt, bind a workspace, spawn a Worker, and confirm its outcome.
@@ -144,7 +144,10 @@ pub fn start(
                     None,
                 );
             }
-            Ok(WorkerExit::Parked { control_request_id }) => {
+            Ok(WorkerExit::Parked {
+                control_request_id,
+                input_request,
+            }) => {
                 return park_claim(
                     store,
                     clock,
@@ -153,6 +156,7 @@ pub fn start(
                     &attempt_id,
                     true,
                     control_request_id,
+                    input_request.as_ref(),
                 );
             }
             Ok(WorkerExit::Aborted { control_request_id }) => {
@@ -257,6 +261,7 @@ fn confirm(
     Ok(work.clone())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn park_claim(
     store: &mut impl WorkStore,
     clock: &impl Clock,
@@ -265,17 +270,20 @@ fn park_claim(
     attempt_id: &AttemptId,
     checkpoint_recorded: bool,
     control_request_id: Option<i64>,
+    input_request: Option<&workengine_domain::InputRequest>,
 ) -> Result<Work, AppError> {
     let from = work.status();
     work.park()?;
-    store.park_attempt_with_checkpoint(
+    let event = WorkEvent::parked(work, from, clock.unix_ms());
+    store.park_attempt_with_input(&AttemptPark {
         work,
-        WorkEvent::parked(work, from, clock.unix_ms()),
+        event: &event,
         execution_id,
         attempt_id,
         checkpoint_recorded,
         control_request_id,
-    )?;
+        input_request,
+    })?;
     Ok(work.clone())
 }
 

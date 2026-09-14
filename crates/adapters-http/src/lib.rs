@@ -473,6 +473,14 @@ struct AttemptResponse {
     checkpoint: &'static str,
     process_records: Vec<ProcessRecordResponse>,
     confirmed_outcome: Option<ConfirmedOutcomeResponse>,
+    input_request: Option<InputRequestResponse>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InputRequestResponse {
+    kind: &'static str,
+    prompt: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -492,6 +500,18 @@ struct ConfirmedOutcomeResponse {
     kind: &'static str,
     worker_profile: String,
     confirmed_at_unix_ms: String,
+    proofs: Vec<WorkerProofResponse>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkerProofResponse {
+    kind: &'static str,
+    name: String,
+    media_type: String,
+    sha256: String,
+    content: String,
+    authority: &'static str,
 }
 
 #[derive(Serialize)]
@@ -1253,6 +1273,13 @@ fn attempt_response(attempt: &AttemptObservation) -> AttemptResponse {
             .confirmed_outcome
             .as_ref()
             .map(confirmed_outcome_response),
+        input_request: attempt
+            .input_request
+            .as_ref()
+            .map(|request| InputRequestResponse {
+                kind: request.kind.as_str(),
+                prompt: request.prompt.clone(),
+            }),
     }
 }
 
@@ -1274,6 +1301,18 @@ fn confirmed_outcome_response(
         kind: outcome.kind.as_str(),
         worker_profile: outcome.worker_profile.clone(),
         confirmed_at_unix_ms: outcome.confirmed_at_unix_ms.to_string(),
+        proofs: outcome
+            .proofs
+            .iter()
+            .map(|proof| WorkerProofResponse {
+                kind: proof.kind().as_str(),
+                name: proof.name().to_owned(),
+                media_type: proof.media_type().to_owned(),
+                sha256: proof.digest().as_str().to_owned(),
+                content: proof.content().to_owned(),
+                authority: "worker_reported",
+            })
+            .collect(),
     }
 }
 
@@ -1295,7 +1334,13 @@ fn attempt_diagnostics(
         AttemptState::Parked => (
             "warning",
             "attempt_parked",
-            if attempt.checkpoint_recorded {
+            if let Some(request) = &attempt.input_request {
+                format!(
+                    "The attempt parked with checkpoint proof for a structured {} request: {}",
+                    request.kind.as_str(),
+                    request.prompt
+                )
+            } else if attempt.checkpoint_recorded {
                 "The attempt parked with checkpoint proof.".to_owned()
             } else {
                 "The attempt parked without a recorded checkpoint proof.".to_owned()
@@ -1454,13 +1499,15 @@ mod tests {
     use tower::ServiceExt;
     use workengine_adapters_store::SqliteStore;
     use workengine_application::{
-        AttemptClaim, AttemptRecorder, RelationStore, SystemClock, WorkStore, create, create_scoped,
+        AttemptClaim, AttemptObservation, AttemptRecorder, AttemptState, InputRequestObservation,
+        RelationStore, SystemClock, WorkStore, create, create_scoped,
     };
     use workengine_domain::{
         AttemptId, CONFIRMED_OUTCOME_SCHEMA_VERSION, ChannelPolicy, ConfirmedOutcome,
-        ContentDigest, EXECUTION_SPEC_SCHEMA_VERSION, ExecutionId, ExecutionSpec,
-        OUTCOME_SCHEMA_VERSION, Outcome, OutcomeKind, RelationKind, RuntimeKind, SecretRef,
-        SecretSource, Work, WorkAttributes, WorkEvent, WorkId, WorkRelation, WorkStatus,
+        ContentDigest, EXECUTION_SPEC_SCHEMA_VERSION, ExecutionId, ExecutionSpec, InputRequestKind,
+        OUTCOME_SCHEMA_VERSION, Outcome, OutcomeKind, ProofArtifact, ProofKind, RelationKind,
+        RuntimeKind, SecretRef, SecretSource, Work, WorkAttributes, WorkEvent, WorkId,
+        WorkRelation, WorkStatus,
     };
 
     use super::*;
@@ -1971,7 +2018,22 @@ mod tests {
                 12,
             )
             .unwrap();
-        let outcome = Outcome::new(OUTCOME_SCHEMA_VERSION, OutcomeKind::Succeeded, "stub").unwrap();
+        let outcome = Outcome::new(OUTCOME_SCHEMA_VERSION, OutcomeKind::Succeeded, "stub")
+            .unwrap()
+            .with_proofs(vec![
+                ProofArtifact::new(
+                    ProofKind::Change,
+                    "working-tree.patch",
+                    "text/x-diff",
+                    ContentDigest::parse(
+                        "sha256:10a5235388c982c615f6d67de7541742073ba59f035ad30fc78e45a5cbf9a291",
+                    )
+                    .unwrap(),
+                    "reviewable patch",
+                )
+                .unwrap(),
+            ])
+            .unwrap();
         let confirmed = ConfirmedOutcome::new(
             CONFIRMED_OUTCOME_SCHEMA_VERSION,
             execution_id,
@@ -2014,6 +2076,14 @@ mod tests {
             .unwrap();
         assert_eq!(stdout["payloadRedacted"], true);
         assert_eq!(observation["diagnostics"][0]["code"], "confirmed_success");
+        assert_eq!(
+            observation["executions"][0]["attempts"][0]["confirmedOutcome"]["proofs"][0]["authority"],
+            "worker_reported"
+        );
+        assert_eq!(
+            observation["executions"][0]["attempts"][0]["confirmedOutcome"]["proofs"][0]["content"],
+            "reviewable patch"
+        );
         assert_eq!(observation["artifacts"].as_array().unwrap().len(), 3);
         let encoded = serde_json::to_string(&observation).unwrap();
         assert!(!encoded.contains("/secret/workspace/path"));
@@ -2028,6 +2098,32 @@ mod tests {
                 .unwrap();
             assert_eq!(proof.status(), StatusCode::OK, "{href}");
         }
+    }
+
+    #[test]
+    fn attempt_response_exposes_a_structured_operator_request() {
+        let attempt = AttemptObservation {
+            attempt_id: AttemptId::parse("attempt-input").unwrap(),
+            state: AttemptState::Parked,
+            retry_ordinal: 0,
+            started_at_unix_ms: 1,
+            last_heartbeat_at_unix_ms: 2,
+            finished_at_unix_ms: Some(2),
+            terminal_reason: Some("parked".to_owned()),
+            checkpoint_recorded: true,
+            input_request: Some(InputRequestObservation {
+                kind: InputRequestKind::Question,
+                prompt: "Which compatibility boundary should remain?".to_owned(),
+            }),
+            process_records: Vec::new(),
+            confirmed_outcome: None,
+        };
+        let response = serde_json::to_value(attempt_response(&attempt)).unwrap();
+        assert_eq!(response["inputRequest"]["kind"], "question");
+        assert_eq!(
+            response["inputRequest"]["prompt"],
+            "Which compatibility boundary should remain?"
+        );
     }
 
     #[test]

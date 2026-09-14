@@ -8,11 +8,64 @@ use std::process::Command;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use workengine_application::{AppError, ChannelReaction, RunRequest, WorkerExit, WorkerRunner};
-use workengine_domain::{OUTCOME_SCHEMA_VERSION, Outcome, OutcomeKind};
+use workengine_domain::{
+    InputRequest, InputRequestKind, OUTCOME_SCHEMA_VERSION, Outcome, OutcomeKind,
+};
 
 use crate::decode_outcome;
 use crate::encode_outcome;
-use crate::supervise::{ChildWait, spawn_supervised};
+use crate::supervise::{ChildWait, checkpoint_is_valid, spawn_supervised};
+
+const TASK_PACKET_SCHEMA_VERSION: u32 = 1;
+const ATTEMPT_RESPONSE_SCHEMA_VERSION: u32 = 1;
+const TASK_PACKET_DIRECTORY: &str = ".workengine-task-packets";
+const ATTEMPT_RESPONSE_FILE: &str = "attempt-response.json";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkerProtocol {
+    LegacyOutcomeV1,
+    TaskPacketV1,
+}
+
+impl WorkerProtocol {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LegacyOutcomeV1 => "legacy-outcome-v1",
+            Self::TaskPacketV1 => "task-packet-v1",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ValidationStep {
+    name: String,
+    argv: Vec<String>,
+}
+
+impl ValidationStep {
+    pub fn new(name: impl Into<String>, argv: Vec<String>) -> Result<Self, AppError> {
+        let name = name.into();
+        if name.trim().is_empty()
+            || name.len() > 128
+            || name.chars().any(char::is_control)
+            || argv.is_empty()
+            || argv
+                .iter()
+                .any(|part| part.is_empty() || part.len() > 4_096)
+        {
+            return Err(AppError::worker("invalid validation step"));
+        }
+        Ok(Self { name, argv })
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn argv(&self) -> &[String] {
+        &self.argv
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Sandbox {
@@ -106,6 +159,8 @@ pub struct ProcessWorkerRunner {
     secret_files: Vec<SecretFile>,
     sandbox: Sandbox,
     policy: WorkerPolicy,
+    protocol: WorkerProtocol,
+    validation: Vec<ValidationStep>,
 }
 
 impl ProcessWorkerRunner {
@@ -123,8 +178,31 @@ impl ProcessWorkerRunner {
         sandbox: Sandbox,
         policy: WorkerPolicy,
     ) -> Result<Self, AppError> {
+        Self::new_with_harness(
+            argv,
+            secret_files,
+            sandbox,
+            policy,
+            WorkerProtocol::LegacyOutcomeV1,
+            Vec::new(),
+        )
+    }
+
+    pub fn new_with_harness(
+        argv: Vec<String>,
+        secret_files: Vec<SecretFile>,
+        sandbox: Sandbox,
+        policy: WorkerPolicy,
+        protocol: WorkerProtocol,
+        validation: Vec<ValidationStep>,
+    ) -> Result<Self, AppError> {
         if argv.is_empty() || argv[0].is_empty() {
             return Err(AppError::worker("profile argv is empty"));
+        }
+        if validation.len() > 32 {
+            return Err(AppError::worker(
+                "validation contract has more than 32 steps",
+            ));
         }
         match &sandbox {
             Sandbox::Bubblewrap { rootfs, .. } if !rootfs.is_dir() || rootfs == Path::new("/") => {
@@ -177,6 +255,8 @@ impl ProcessWorkerRunner {
             secret_files,
             sandbox,
             policy,
+            protocol,
+            validation,
         })
     }
 }
@@ -186,6 +266,9 @@ impl WorkerRunner for ProcessWorkerRunner {
         let profile = request.work.attributes().worker_profile();
         fs::create_dir_all(request.workspace_root).map_err(AppError::worker)?;
         self.verify_runtime()?;
+        if self.protocol == WorkerProtocol::TaskPacketV1 {
+            write_task_packet(request, &self.validation)?;
+        }
         let secrets = SecretDirectory::create(&self.secret_files)?;
         let (cmd, _seccomp_file) =
             self.command(request, secrets.as_ref().map(SecretDirectory::path))?;
@@ -199,15 +282,19 @@ impl WorkerRunner for ProcessWorkerRunner {
             )?;
         }
         match waited {
+            Ok(ChildWait::Exited { .. }) if self.protocol == WorkerProtocol::TaskPacketV1 => {
+                read_attempt_response(request, profile)
+            }
             Ok(ChildWait::Exited { .. }) => {
                 read_or_fail(request.workspace_root, profile).map(WorkerExit::Completed)
             }
             Ok(ChildWait::BudgetExceeded) => {
                 persist_timed_out(request.workspace_root, profile).map(WorkerExit::Completed)
             }
-            Ok(ChildWait::Parked { control_request_id }) => {
-                Ok(WorkerExit::Parked { control_request_id })
-            }
+            Ok(ChildWait::Parked { control_request_id }) => Ok(WorkerExit::Parked {
+                control_request_id,
+                input_request: None,
+            }),
             Ok(ChildWait::Aborted { control_request_id }) => {
                 Ok(WorkerExit::Aborted { control_request_id })
             }
@@ -283,6 +370,14 @@ impl ProcessWorkerRunner {
                 cmd.args(["--bind"])
                     .arg(request.control_root)
                     .arg("/run/workengine");
+                if self.protocol == WorkerProtocol::TaskPacketV1 {
+                    let packet_path = task_packet_host_path(request);
+                    let container_path = task_packet_container_path(request);
+                    cmd.args(["--ro-bind"])
+                        .arg(packet_path)
+                        .arg(&container_path);
+                    attach_harness_environment(&mut cmd, true, &container_path);
+                }
                 if let Some(secrets) = secrets {
                     cmd.args(["--dir", "/run/secrets", "--ro-bind"])
                         .arg(secrets)
@@ -363,6 +458,15 @@ impl ProcessWorkerRunner {
                     "type=bind,src={},dst=/run/workengine,rw",
                     request.control_root.display()
                 ));
+                if self.protocol == WorkerProtocol::TaskPacketV1 {
+                    let packet_path = task_packet_host_path(request);
+                    let container_path = task_packet_container_path(request);
+                    cmd.arg("--mount").arg(format!(
+                        "type=bind,src={},dst={container_path},readonly",
+                        packet_path.display()
+                    ));
+                    attach_harness_environment(&mut cmd, false, &container_path);
+                }
                 cmd.args(["--workdir", "/workspace"]);
                 if let Some(secrets) = secrets {
                     cmd.arg("--mount").arg(format!(
@@ -680,6 +784,24 @@ fn attach_egress(command: &mut Command, policy: &EgressPolicy, bubblewrap: bool)
     }
 }
 
+fn attach_harness_environment(command: &mut Command, bubblewrap: bool, task_packet: &str) {
+    let values = [
+        ("WORKENGINE_TASK_PACKET", task_packet),
+        (
+            "WORKENGINE_ATTEMPT_RESPONSE",
+            "/run/workengine/attempt-response.json",
+        ),
+        ("WORKENGINE_CHECKPOINT", "/run/workengine/checkpoint.json"),
+    ];
+    for (name, value) in values {
+        if bubblewrap {
+            command.args(["--setenv", name, value]);
+        } else {
+            command.args(["--env", &format!("{name}={value}")]);
+        }
+    }
+}
+
 fn verify_oci_image(engine: &str, image: &str) -> Result<(), AppError> {
     let expected =
         image_digest(image).ok_or_else(|| AppError::worker("OCI image must be digest pinned"))?;
@@ -839,6 +961,230 @@ fn valid_secret_name(name: &str) -> bool {
         && chars.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TaskPacket<'a> {
+    schema_version: u32,
+    work_id: &'a str,
+    execution_id: &'a str,
+    attempt_id: &'a str,
+    worker_profile: &'a str,
+    goal: &'a str,
+    repository: RepositoryPacket<'a>,
+    validation_contract: ValidationContractPacket<'a>,
+    operator_inputs_path: &'static str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RepositoryPacket<'a> {
+    identity: Option<&'a str>,
+    revision: Option<String>,
+    workspace_path: &'static str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ValidationContractPacket<'a> {
+    steps: Vec<ValidationStepPacket<'a>>,
+}
+
+#[derive(Serialize)]
+struct ValidationStepPacket<'a> {
+    name: &'a str,
+    argv: &'a [String],
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AttemptResponse {
+    schema_version: u32,
+    work_id: String,
+    execution_id: String,
+    attempt_id: String,
+    worker_profile: String,
+    result: AttemptResult,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+enum AttemptResult {
+    Outcome {
+        kind: String,
+        #[serde(default)]
+        proofs: Vec<serde_json::Value>,
+    },
+    InputRequired {
+        #[serde(rename = "requestKind")]
+        request_kind: String,
+        prompt: String,
+    },
+}
+
+fn write_task_packet(
+    request: &RunRequest<'_>,
+    validation: &[ValidationStep],
+) -> Result<(), AppError> {
+    let directory = request.workspace_root.join(TASK_PACKET_DIRECTORY);
+    match directory.symlink_metadata() {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Err(AppError::worker(
+                "workspace task-packet path must be a directory and not a symlink",
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir(&directory).map_err(AppError::worker)?;
+        }
+        Err(error) => return Err(AppError::worker(error)),
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
+            .map_err(AppError::worker)?;
+    }
+    let packet = TaskPacket {
+        schema_version: TASK_PACKET_SCHEMA_VERSION,
+        work_id: request.work.id().as_str(),
+        execution_id: request.execution_id.as_str(),
+        attempt_id: request.attempt_id.as_str(),
+        worker_profile: request.work.attributes().worker_profile(),
+        goal: request.work.attributes().goal(),
+        repository: RepositoryPacket {
+            identity: request.work.attributes().repository(),
+            revision: repository_revision(request.workspace_root),
+            workspace_path: "/workspace",
+        },
+        validation_contract: ValidationContractPacket {
+            steps: validation
+                .iter()
+                .map(|step| ValidationStepPacket {
+                    name: step.name(),
+                    argv: step.argv(),
+                })
+                .collect(),
+        },
+        operator_inputs_path: "/workspace/.workengine/operator-inputs.jsonl",
+    };
+    crate::fs_safe::write(
+        &task_packet_host_path(request),
+        &serde_json::to_vec_pretty(&packet).map_err(AppError::worker)?,
+    )
+}
+
+fn task_packet_host_path(request: &RunRequest<'_>) -> PathBuf {
+    request
+        .workspace_root
+        .join(TASK_PACKET_DIRECTORY)
+        .join(format!("{}.json", request.attempt_id))
+}
+
+fn task_packet_container_path(request: &RunRequest<'_>) -> String {
+    format!(
+        "/workspace/{TASK_PACKET_DIRECTORY}/{}.json",
+        request.attempt_id
+    )
+}
+
+fn repository_revision(workspace_root: &Path) -> Option<String> {
+    let mut command = Command::new("git");
+    controlled_environment(&mut command);
+    let output = command
+        .args([
+            "-C",
+            workspace_root.to_str()?,
+            "rev-parse",
+            "--verify",
+            "HEAD",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let revision = String::from_utf8(output.stdout).ok()?;
+    let revision = revision.trim();
+    (!revision.is_empty() && revision.len() <= 128).then(|| revision.to_owned())
+}
+
+fn read_attempt_response(
+    request: &mut RunRequest<'_>,
+    profile: &str,
+) -> Result<WorkerExit, AppError> {
+    let bytes = match crate::fs_safe::read(&request.control_root.join(ATTEMPT_RESPONSE_FILE)) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Outcome::new(OUTCOME_SCHEMA_VERSION, OutcomeKind::Failed, profile)
+                .map(WorkerExit::Completed)
+                .map_err(AppError::from);
+        }
+        Err(error) => return Err(AppError::worker(error)),
+    };
+    let response: AttemptResponse =
+        serde_json::from_slice(&bytes).map_err(AppError::outcome_schema)?;
+    if response.schema_version != ATTEMPT_RESPONSE_SCHEMA_VERSION
+        || response.work_id != request.work.id().as_str()
+        || response.execution_id != request.execution_id.as_str()
+        || response.attempt_id != request.attempt_id.as_str()
+        || response.worker_profile != profile
+    {
+        return Err(AppError::outcome_schema(
+            "attempt response does not match the active attempt",
+        ));
+    }
+    match response.result {
+        AttemptResult::Outcome { kind, proofs } => {
+            if matches!(kind.as_str(), "timed_out" | "budget_exceeded") {
+                return Err(AppError::outcome_schema(
+                    "timeout and budget outcomes are assigned by Workengine",
+                ));
+            }
+            let payload = serde_json::json!({
+                "schemaVersion": OUTCOME_SCHEMA_VERSION,
+                "kind": kind,
+                "workerProfile": profile,
+                "proofs": proofs,
+            });
+            decode_outcome(&serde_json::to_vec(&payload).map_err(AppError::worker)?)
+                .map(WorkerExit::Completed)
+        }
+        AttemptResult::InputRequired {
+            request_kind,
+            prompt,
+        } => {
+            if !checkpoint_is_valid(request)? {
+                return Err(AppError::outcome_schema(
+                    "input-required response needs a matching checkpoint candidate",
+                ));
+            }
+            request.recorder.record_checkpoint(
+                request.work.id(),
+                request.execution_id,
+                request.attempt_id,
+                now_unix_ms()?,
+            )?;
+            let kind = request_kind
+                .parse::<InputRequestKind>()
+                .map_err(AppError::outcome_schema)?;
+            let input_request =
+                InputRequest::new(kind, prompt).map_err(AppError::outcome_schema)?;
+            Ok(WorkerExit::Parked {
+                control_request_id: None,
+                input_request: Some(input_request),
+            })
+        }
+    }
+}
+
+fn now_unix_ms() -> Result<u64, AppError> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(AppError::worker)?;
+    Ok(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+}
+
 fn read_or_fail(root: &Path, profile: &str) -> Result<Outcome, AppError> {
     let dest = root.join("outcome.json");
     match crate::fs_safe::read(&dest) {
@@ -971,6 +1317,8 @@ mod tests {
                 seccomp_digest: digest_file(&dir.path().join("seccomp.json")).unwrap(),
             },
             policy: WorkerPolicy::default(),
+            protocol: WorkerProtocol::LegacyOutcomeV1,
+            validation: Vec::new(),
         };
         let (command, _) = runner.command(&request, None).unwrap();
         let args = command
@@ -1010,9 +1358,15 @@ mod tests {
     fn bubblewrap_command_applies_policy_without_a_network_capability() {
         let dir = tempfile::tempdir().unwrap();
         let runtime = tempfile::tempdir().unwrap();
-        let runner =
-            ProcessWorkerRunner::new(vec!["/busybox".to_owned()], vec![], sandbox(&runtime))
-                .unwrap();
+        let runner = ProcessWorkerRunner::new_with_harness(
+            vec!["/busybox".to_owned()],
+            vec![],
+            sandbox(&runtime),
+            WorkerPolicy::default(),
+            WorkerProtocol::TaskPacketV1,
+            vec![],
+        )
+        .unwrap();
         let work = work();
         let execution_id = ExecutionId::parse("execution-policy").unwrap();
         let attempt_id = AttemptId::parse("attempt-policy").unwrap();
@@ -1039,6 +1393,13 @@ mod tests {
         assert!(args.iter().any(|arg| arg == "--seccomp"));
         assert!(args.iter().any(|arg| arg == "--unshare-all"));
         assert!(!args.iter().any(|arg| arg == "--share-net"));
+        assert!(args.iter().any(|arg| arg == "WORKENGINE_TASK_PACKET"));
+        assert!(args.iter().any(|arg| arg.ends_with("attempt-policy.json")));
+        let packet_position = args
+            .iter()
+            .position(|arg| arg.ends_with("attempt-policy.json"))
+            .unwrap();
+        assert_eq!(args[packet_position - 1], "--ro-bind");
     }
 
     #[cfg(unix)]
@@ -1147,6 +1508,8 @@ mod tests {
                 resources: ResourceLimits::default(),
                 egress: EgressPolicy::BrokerSocket(socket),
             },
+            protocol: WorkerProtocol::LegacyOutcomeV1,
+            validation: Vec::new(),
         };
         let work = work();
         let execution_id = ExecutionId::parse("execution-1").unwrap();
@@ -1231,6 +1594,68 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn contained_task_packet_worker_completes_a_real_change_with_proof() {
+        let _guard = sandbox_test_lock();
+        if unavailable_sandbox() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let proof = "greeting.txt changed to hello\n";
+        let proof_digest = format!("sha256:{:x}", Sha256::digest(proof.as_bytes()));
+        let script = format!(
+            "test -s \"$WORKENGINE_TASK_PACKET\" && printf hello > greeting.txt && printf '%s\\n' '{}' > \"$WORKENGINE_ATTEMPT_RESPONSE\"",
+            serde_json::json!({
+                "schemaVersion": 1,
+                "workId": "work-1",
+                "executionId": "execution-test",
+                "attemptId": "attempt-test",
+                "workerProfile": "echo",
+                "result": {
+                    "type": "outcome",
+                    "kind": "succeeded",
+                    "proofs": [{
+                        "kind": "change",
+                        "name": "greeting-change",
+                        "mediaType": "text/plain",
+                        "sha256": proof_digest,
+                        "content": proof
+                    }]
+                }
+            })
+        );
+        let runner = ProcessWorkerRunner::new_with_harness(
+            vec![
+                "/busybox".to_owned(),
+                "sh".to_owned(),
+                "-c".to_owned(),
+                script,
+            ],
+            vec![],
+            sandbox(&root),
+            WorkerPolicy::default(),
+            WorkerProtocol::TaskPacketV1,
+            vec![
+                ValidationStep::new(
+                    "read greeting",
+                    vec!["cat".to_owned(), "greeting.txt".to_owned()],
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+        let work = work();
+        let outcome = run(&runner, &work, dir.path(), Duration::from_secs(2)).unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.path().join("greeting.txt")).unwrap(),
+            "hello"
+        );
+        assert_eq!(outcome.kind(), OutcomeKind::Succeeded);
+        assert_eq!(outcome.proofs()[0].content(), proof);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn undeclared_env_is_not_inherited() {
         let _guard = sandbox_test_lock();
         if unavailable_sandbox() {
@@ -1308,5 +1733,181 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn task_packet_materializes_repository_and_validation_contract() {
+        let workspace = tempfile::tempdir().unwrap();
+        let control = tempfile::tempdir().unwrap();
+        let work = Work::new(
+            WorkId::parse("work-task-packet").unwrap(),
+            WorkAttributes::scoped(
+                "change the greeting",
+                "coder",
+                workengine_domain::ProjectId::parse("project-a").unwrap(),
+                Some("https://example.invalid/repo.git".to_owned()),
+                None,
+            )
+            .unwrap(),
+            1,
+        )
+        .unwrap();
+        let execution = ExecutionId::parse("execution-task-packet").unwrap();
+        let attempt = AttemptId::parse("attempt-task-packet").unwrap();
+        let mut recorder = DiscardAttemptRecorder;
+        let request = RunRequest {
+            work: &work,
+            execution_id: &execution,
+            attempt_id: &attempt,
+            workspace_root: workspace.path(),
+            control_root: control.path(),
+            budget: Duration::from_secs(1),
+            recorder: &mut recorder,
+        };
+        write_task_packet(
+            &request,
+            &[ValidationStep::new("tests", vec!["just".to_owned(), "check".to_owned()]).unwrap()],
+        )
+        .unwrap();
+        let packet: serde_json::Value =
+            serde_json::from_slice(&fs::read(task_packet_host_path(&request)).unwrap()).unwrap();
+        assert_eq!(packet["schemaVersion"], 1);
+        assert_eq!(packet["goal"], "change the greeting");
+        assert_eq!(
+            packet["repository"]["identity"],
+            "https://example.invalid/repo.git"
+        );
+        assert_eq!(packet["validationContract"]["steps"][0]["argv"][0], "just");
+        let schema: serde_json::Value =
+            serde_json::from_str(include_str!("../../../schemas/task-packet.json")).unwrap();
+        assert_eq!(schema["properties"]["schemaVersion"]["const"], 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn task_packet_directory_does_not_follow_a_workspace_symlink() {
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let control = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), workspace.path().join(TASK_PACKET_DIRECTORY))
+            .unwrap();
+        let work = work();
+        let execution = ExecutionId::parse("execution-symlink").unwrap();
+        let attempt = AttemptId::parse("attempt-symlink").unwrap();
+        let mut recorder = DiscardAttemptRecorder;
+        let request = RunRequest {
+            work: &work,
+            execution_id: &execution,
+            attempt_id: &attempt,
+            workspace_root: workspace.path(),
+            control_root: control.path(),
+            budget: Duration::from_secs(1),
+            recorder: &mut recorder,
+        };
+        assert!(write_task_packet(&request, &[]).is_err());
+        assert!(fs::read_dir(outside.path()).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn attempt_response_returns_bounded_review_proof() {
+        let workspace = tempfile::tempdir().unwrap();
+        let control = tempfile::tempdir().unwrap();
+        let work = work();
+        let execution = ExecutionId::parse("execution-proof").unwrap();
+        let attempt = AttemptId::parse("attempt-proof").unwrap();
+        let content = "diff --git a/greeting.txt b/greeting.txt\n";
+        let digest = format!("sha256:{:x}", Sha256::digest(content.as_bytes()));
+        let response = serde_json::json!({
+            "schemaVersion": 1,
+            "workId": work.id().as_str(),
+            "executionId": execution.as_str(),
+            "attemptId": attempt.as_str(),
+            "workerProfile": "echo",
+            "result": {
+                "type": "outcome",
+                "kind": "succeeded",
+                "proofs": [{
+                    "kind": "change",
+                    "name": "working-tree.patch",
+                    "mediaType": "text/x-diff",
+                    "sha256": digest,
+                    "content": content
+                }]
+            }
+        });
+        crate::fs_safe::write(
+            &control.path().join(ATTEMPT_RESPONSE_FILE),
+            &serde_json::to_vec(&response).unwrap(),
+        )
+        .unwrap();
+        let mut recorder = DiscardAttemptRecorder;
+        let mut request = RunRequest {
+            work: &work,
+            execution_id: &execution,
+            attempt_id: &attempt,
+            workspace_root: workspace.path(),
+            control_root: control.path(),
+            budget: Duration::from_secs(1),
+            recorder: &mut recorder,
+        };
+        let WorkerExit::Completed(outcome) = read_attempt_response(&mut request, "echo").unwrap()
+        else {
+            panic!("expected a completed outcome");
+        };
+        assert_eq!(outcome.kind(), OutcomeKind::Succeeded);
+        assert_eq!(outcome.proofs()[0].content(), content);
+    }
+
+    #[test]
+    fn structured_question_requires_checkpoint_and_parks() {
+        let workspace = tempfile::tempdir().unwrap();
+        let control = tempfile::tempdir().unwrap();
+        let work = work();
+        let execution = ExecutionId::parse("execution-question").unwrap();
+        let attempt = AttemptId::parse("attempt-question").unwrap();
+        let response = serde_json::json!({
+            "schemaVersion": 1,
+            "workId": work.id().as_str(),
+            "executionId": execution.as_str(),
+            "attemptId": attempt.as_str(),
+            "workerProfile": "echo",
+            "result": {
+                "type": "input_required",
+                "requestKind": "question",
+                "prompt": "Which public API should remain compatible?"
+            }
+        });
+        crate::fs_safe::write(
+            &control.path().join(ATTEMPT_RESPONSE_FILE),
+            &serde_json::to_vec(&response).unwrap(),
+        )
+        .unwrap();
+        let mut recorder = DiscardAttemptRecorder;
+        let mut request = RunRequest {
+            work: &work,
+            execution_id: &execution,
+            attempt_id: &attempt,
+            workspace_root: workspace.path(),
+            control_root: control.path(),
+            budget: Duration::from_secs(1),
+            recorder: &mut recorder,
+        };
+        assert!(read_attempt_response(&mut request, "echo").is_err());
+        crate::supervise::write_checkpoint_candidate(&request).unwrap();
+        let WorkerExit::Parked {
+            input_request: Some(input_request),
+            ..
+        } = read_attempt_response(&mut request, "echo").unwrap()
+        else {
+            panic!("expected a structured park");
+        };
+        assert_eq!(input_request.kind(), InputRequestKind::Question);
+        assert_eq!(
+            input_request.prompt(),
+            "Which public API should remain compatible?"
+        );
+        let schema: serde_json::Value =
+            serde_json::from_str(include_str!("../../../schemas/attempt-response.json")).unwrap();
+        assert_eq!(schema["properties"]["schemaVersion"]["const"], 1);
     }
 }

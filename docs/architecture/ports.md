@@ -39,12 +39,13 @@ released when Work leaves its active slot.
 
 Spawns a Worker process, verifies its runtime digest and deny-by-default
 permission profile, applies resource/seccomp/capability and brokered-egress
-containment, waits, enforces budget and hang detection, and returns a typed
-outcome.
+containment, materializes the optional neutral task-packet harness contract,
+waits, enforces budget and hang detection, and returns a typed outcome or
+checkpoint-backed structured input request.
 
 | First adapter | Next |
 | --- | --- |
-| Stub that writes a schema-valid outcome and exits; generic process from a profile (argv + env refs) | A named vendor CLI still behind the same trait |
+| Stub that writes a schema-valid outcome and exits; generic process from a profile (argv + secret refs), including `task-packet-v1` | A named vendor CLI still behind the same trait |
 
 Behaviour: [worker.md](../spec/worker.md) (process group, budget and hang outside the child, closed outcome).
 

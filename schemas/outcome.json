@@ -17,6 +17,22 @@
         "channel_error"
       ]
     },
-    "workerProfile": { "type": "string", "minLength": 1 }
+    "workerProfile": { "type": "string", "minLength": 1 },
+    "proofs": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "name", "mediaType", "sha256", "content"],
+        "properties": {
+          "kind": { "type": "string", "enum": ["change", "validation"] },
+          "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "mediaType": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+          "content": { "type": "string", "maxLength": 65536 }
+        }
+      }
+    }
   }
 }

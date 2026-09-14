@@ -648,6 +648,34 @@ function AttemptCard({
           </>
         )}
       </p>
+      {attempt.inputRequest && (
+        <section
+          className="diagnostic warning"
+          aria-label="Worker input request"
+        >
+          <strong>{attempt.inputRequest.kind} required</strong>
+          <p>{attempt.inputRequest.prompt}</p>
+        </section>
+      )}
+      {attempt.confirmedOutcome &&
+        attempt.confirmedOutcome.proofs.length > 0 && (
+          <section
+            className="process-records"
+            aria-label="Worker-reported proof"
+          >
+            {attempt.confirmedOutcome.proofs.map((proof) => (
+              <div
+                className="process-record"
+                key={`${proof.kind}:${proof.name}`}
+              >
+                <PackageOpen size={14} />
+                <code>{proof.name}</code>
+                <strong>{proof.kind}</strong>
+                <span>{proof.authority.replaceAll("_", " ")}</span>
+              </div>
+            ))}
+          </section>
+        )}
       <ProcessRecords attempt={attempt} />
     </article>
   );

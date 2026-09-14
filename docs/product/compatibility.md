@@ -20,7 +20,7 @@ These are public contracts. A breaking change is a major version, plus a migrati
 | Outcome JSON schema (`schemaVersion`) | Stable within a major; unknown fields must fail closed or be reserved |
 | Store artifact schema (`schemaVersion`) | Store v2 rejects v1 directories without mutation; operators create a new data directory |
 | Workspace memory line schema (`schemaVersion`) | Stable within a major |
-| Attempt checkpoint and operator-input schemas (`schemaVersion`) | Stable within a major |
+| Task packet, attempt response, checkpoint, operator-input, and proof schemas (`schemaVersion`) | Stable within a major |
 | Supervised subprocess stream record (`schemaVersion`, camelCase) | Stable within a major; same JSON dialect as outcome and event |
 | Domain status and outcome enumerations that appear in those schemas (`ready`, `running`, `succeeded`, `failed`, `parked`; outcome kinds in [../spec/worker.md](../spec/worker.md)) | Stable |
 

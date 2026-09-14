@@ -389,6 +389,16 @@ components:
           oneOf:
             - { $ref: '#/components/schemas/ConfirmedOutcome' }
             - { type: 'null' }
+        inputRequest:
+          oneOf:
+            - { $ref: '#/components/schemas/InputRequest' }
+            - { type: 'null' }
+    InputRequest:
+      type: object
+      required: [kind, prompt]
+      properties:
+        kind: { type: string, enum: [question, consent] }
+        prompt: { type: string, minLength: 1, maxLength: 4096 }
     ProcessRecord:
       type: object
       required: [event, occurrences, firstObservedAtUnixMs, lastObservedAtUnixMs, payloadRedacted]
@@ -400,12 +410,23 @@ components:
         payloadRedacted: { type: boolean }
     ConfirmedOutcome:
       type: object
-      required: [schemaVersion, kind, workerProfile, confirmedAtUnixMs]
+      required: [schemaVersion, kind, workerProfile, confirmedAtUnixMs, proofs]
       properties:
         schemaVersion: { type: integer, const: 1 }
         kind: { type: string, enum: [succeeded, failed, timed_out, budget_exceeded, channel_error] }
         workerProfile: { type: string }
         confirmedAtUnixMs: { type: string, pattern: '^[0-9]+$' }
+        proofs: { type: array, maxItems: 8, items: { $ref: '#/components/schemas/WorkerProof' } }
+    WorkerProof:
+      type: object
+      required: [kind, name, mediaType, sha256, content, authority]
+      properties:
+        kind: { type: string, enum: [change, validation] }
+        name: { type: string, minLength: 1, maxLength: 128 }
+        mediaType: { type: string, minLength: 1, maxLength: 128 }
+        sha256: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
+        content: { type: string, maxLength: 65536 }
+        authority: { type: string, enum: [worker_reported] }
     Artifact:
       type: object
       required: [kind, label, href, executionId, authoredBy, createdAtUnixMs]

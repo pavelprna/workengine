@@ -48,6 +48,7 @@ rules:
 - **[TESTED]** `park` MUST NOT be abort. Abort, timeout, and hang MUST terminate the process group without treating that path as a save-point pause. `park` MUST reach a save point; abort MUST NOT be required to.
 - **[TESTED]** Parked Work MUST NOT spin, poll, or occupy a Worker slot.
 - **[TESTED]** An answer to a park MUST continue the same Work. It MUST NOT create a new Work.
+- **[TESTED]** A matching attempt response may request a precise question or consent. Workengine MUST validate its checkpoint, persist the structured request, and apply `park`; the Worker cannot name or directly write the resulting status.
 - **[TESTED]** Every active Work lifecycle MUST be interruptible by an operator through checkpointed park or immediate abort.
 - **[TESTED]** Irreversible actions MUST require explicit consent. Consent is a durable operator-input record for the same Work; an automatic mode, if any, MUST be an explicit choice.
 
@@ -87,6 +88,7 @@ rules:
 - **[TESTED]** Output of every Workengine-supervised subprocess, including the Worker, MUST use one streaming format.
 - **[TESTED]** Each record in that stream MUST carry a mandatory set of accounting fields, including `work_id`.
 - **[TESTED]** Navigation from a summary to proof artifacts MUST be a finite number of steps. Each significant step MUST leave a visible proof artifact. The local observer catalogue exposes only control-plane execution specs, redacted process-record summaries, and confirmed outcomes; it does not provide arbitrary workspace navigation.
+- **[TESTED]** A confirmed outcome MAY include bounded change and validation proof. The observer MUST expose its content, digest, and Worker authorship while identifying validation proof as Worker-reported evidence rather than independent verification.
 
 ## Operator park notifications
 
@@ -97,7 +99,7 @@ rules:
 
 - **[TESTED]** Secrets in configuration MUST be stored by reference, never as inline values.
 - **[TESTED]** Configuration MUST be validated lazily: a broken part MUST NOT block unrelated Work. `--config-dir` loads only the selected `<profile>.toml`.
-- **[TESTED]** Changing configuration MUST NOT rewrite the rules of Work that is already in flight. First-slice retry limit and checkout are snapshotted at `start`.
+- **[TESTED]** Changing configuration MUST NOT rewrite the rules of Work that is already in flight. Retry limit, checkout, Worker configuration digest, and task-packet validation contract are snapshotted at `start`; same-execution resume rejects a changed snapshot.
 
 ## Capture and scale
 

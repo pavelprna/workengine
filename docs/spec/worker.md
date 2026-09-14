@@ -24,6 +24,9 @@ This document is the canonical behaviour of Worker. Keywords follow [RFC 2119](h
 - **[TESTED]** Free text from a Worker MUST NOT be interpreted as a control command (next status, publish, park, complete).
 - **[TESTED]** A Worker response MUST conform to an explicit schema with `schemaVersion`.
 - **[TESTED]** A checkpoint candidate MUST use the attempt-scoped control directory and bind `schemaVersion`, Work id, execution id, attempt id, and Worker profile. A stale, foreign, malformed, or workspace-shared candidate MUST NOT park Work.
+- **[TESTED]** A `task-packet-v1` Worker MUST receive a versioned, attempt-specific task packet that binds the Work, execution, attempt, profile, goal, repository context, declared validation contract, and operator-input path. The packet MUST be mounted read-only in the sandbox.
+- **[TESTED]** A `task-packet-v1` response MUST use the protected attempt directory and bind `schemaVersion`, Work id, execution id, attempt id, and Worker profile. A missing response fails closed; a stale, foreign, malformed, or digest-mismatched response MUST NOT complete or park Work.
+- **[TESTED]** A Worker request for operator input MUST be a closed `question` or `consent` record with a bounded prompt and a matching checkpoint. Workengine maps that typed request to `parked`; free text and Worker-supplied status names remain non-authoritative.
 - **[TESTED]** Every Worker run MUST return an outcome from a closed set of kinds. Unknown kinds MUST be a schema error.
 - **[TESTED]** The first runtime slice MUST include at least these outcome kinds: succeeded, failed, timed out / hung, budget exceeded, and a classified channel error.
 
@@ -52,6 +55,7 @@ Optional egress is one explicitly configured Unix broker socket exposed as
 ## Authorship
 
 - **[TESTED]** Every artifact a Worker produces MUST carry explicit authorship: which Worker configuration produced it.
+- **[TESTED]** Review proof returned with an outcome MUST be bounded to eight artifacts, 64 KiB each and 256 KiB total, with a closed kind and verified SHA-256 digest. Worker-reported validation proof MUST be labelled as Worker evidence, not independent control-plane verification.
 
 ## Related
 

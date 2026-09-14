@@ -13,6 +13,10 @@ pub enum DomainError {
     UnknownStatus(String),
     #[error("unknown outcome kind {0:?}")]
     UnknownOutcomeKind(String),
+    #[error("unknown proof artifact kind {0:?}")]
+    UnknownProofKind(String),
+    #[error("unknown operator request kind {0:?}")]
+    UnknownInputRequestKind(String),
     #[error("unknown event kind {0:?}")]
     UnknownEventKind(String),
     #[error("invalid work id")]
@@ -31,6 +35,10 @@ pub enum DomainError {
     InvalidExecutionSpec,
     #[error("invalid confirmed outcome")]
     InvalidConfirmedOutcome,
+    #[error("invalid proof artifact")]
+    InvalidProofArtifact,
+    #[error("invalid operator input request")]
+    InvalidInputRequest,
     #[error("invalid work attributes")]
     InvalidAttributes,
     #[error("unsupported schema version {0}")]

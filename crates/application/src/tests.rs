@@ -5,14 +5,14 @@ use std::time::Duration;
 
 use workengine_domain::{
     AttemptId, ChannelPolicy, ConfirmedOutcome, ContentDigest, EXECUTION_SPEC_SCHEMA_VERSION,
-    ExecutionId, ExecutionSpec, OUTCOME_SCHEMA_VERSION, Outcome, OutcomeKind, ProjectId,
-    RuntimeKind, Work, WorkEvent, WorkId, WorkStatus,
+    ExecutionId, ExecutionSpec, InputRequest, InputRequestKind, OUTCOME_SCHEMA_VERSION, Outcome,
+    OutcomeKind, ProjectId, RuntimeKind, Work, WorkEvent, WorkId, WorkStatus,
 };
 
 use crate::clock::Clock;
 use crate::error::{AppError, ChannelReaction};
 use crate::ports::{
-    AttemptClaim, AttemptRecorder, BindRequest, ExecutionObservation, ExpectedContext,
+    AttemptClaim, AttemptPark, AttemptRecorder, BindRequest, ExecutionObservation, ExpectedContext,
     InboundRecord, InboundSignal, InboundSource, InboundStore, MutationRequest, MutationResult,
     ProcessEvent, Publication, PublicationKind, PublicationStore, Publisher, RemoteMutation,
     RunRequest, SequencedEvent, StartRequest, WorkQuery, WorkStore, WorkerExit, WorkerRunner,
@@ -41,6 +41,7 @@ struct FakeStore {
     events: Vec<WorkEvent>,
     active: HashMap<String, (String, String)>,
     inbound_receipts: HashSet<(String, String)>,
+    input_requests: Vec<InputRequest>,
 }
 
 impl WorkQuery for FakeStore {
@@ -184,6 +185,21 @@ impl WorkStore for FakeStore {
             .insert(work.id().as_str().to_owned(), work.clone());
         self.events.push(event);
         Ok(())
+    }
+
+    fn park_attempt_with_input(&mut self, request: &AttemptPark<'_>) -> Result<(), AppError> {
+        if !request.checkpoint_recorded {
+            return Err(AppError::Conflict("missing checkpoint".to_owned()));
+        }
+        if let Some(input_request) = request.input_request {
+            self.input_requests.push(input_request.clone());
+        }
+        self.park_attempt(
+            request.work,
+            request.event.clone(),
+            request.execution_id,
+            request.attempt_id,
+        )
     }
 }
 
@@ -687,6 +703,7 @@ impl WorkerRunner for ChannelRunner {
             return match self.reactions[i] {
                 ChannelReaction::Park => Ok(WorkerExit::Parked {
                     control_request_id: None,
+                    input_request: None,
                 }),
                 reaction => Err(AppError::Channel(reaction)),
             };
@@ -752,6 +769,46 @@ fn channel_park_parks_the_same_work_without_complete() {
             workengine_domain::EventKind::Started,
             workengine_domain::EventKind::Parked,
         ]
+    );
+}
+
+struct StructuredInputRunner;
+
+impl WorkerRunner for StructuredInputRunner {
+    fn run(&self, _request: &mut RunRequest<'_>) -> Result<WorkerExit, AppError> {
+        Ok(WorkerExit::Parked {
+            control_request_id: None,
+            input_request: Some(InputRequest::new(
+                InputRequestKind::Consent,
+                "May I replace the public fixture?",
+            )?),
+        })
+    }
+
+    fn decode(&self, _bytes: &[u8]) -> Result<Outcome, AppError> {
+        Err(AppError::worker("unused"))
+    }
+}
+
+#[test]
+fn structured_worker_request_is_persisted_before_park() {
+    let mut store = FakeStore::default();
+    let workspace = FakeWorkspace::default();
+    let clock = FakeClock { unix_ms: 1 };
+    let work = ready_work(&mut store, &clock);
+    let parked = start_work(
+        &mut store,
+        &workspace,
+        &StructuredInputRunner,
+        &clock,
+        work.id(),
+    )
+    .unwrap();
+    assert_eq!(parked.status(), WorkStatus::Parked);
+    assert_eq!(store.input_requests.len(), 1);
+    assert_eq!(
+        store.input_requests[0].prompt(),
+        "May I replace the public fixture?"
     );
 }
 

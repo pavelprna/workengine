@@ -45,6 +45,7 @@ Short model for a control plane that spawns processes, holds workspace copies, a
 | Timeout or abort kills parent, children remain | Process group terminate then kill (Unix in this slice) |
 | Daemon crash leaves an unconfirmed Worker | Protected runtime owner record binds PID, process group, process start identity, Work, execution, and attempt; restart kills only an exact match before reclaiming the lease |
 | Worker forges a park or stale checkpoint | Attempt-private control mount; schema and Work/execution/attempt/profile binding validated before `parked` is committed |
+| Worker forges completion evidence or uses proof text as control | Attempt response repeats active provenance; proof count, size, kind, and digest are validated; proof remains labelled Worker-reported and only the closed response variant is mapped by code |
 | Tracker column treated as status | Internal store is SoT; boards are best-effort copies |
 | Workengine phones home | No default telemetry exporter |
 | Destructive host actions | Deny-by-default Worker profile; known-destructive actions forbidden |

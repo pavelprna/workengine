@@ -752,10 +752,12 @@ fn select_runner(
         match profile::resolve_profile(&table, profile_name, |key| std::env::var(key).ok()) {
             Ok(resolved) => {
                 let config_material = format!(
-                    "argv={:?};sandbox={:?};policy={:?};secrets={:?}",
+                    "argv={:?};sandbox={:?};policy={:?};protocol={};validation={:?};secrets={:?}",
                     resolved.argv,
                     resolved.sandbox,
                     resolved.policy,
+                    resolved.protocol.as_str(),
+                    resolved.validation,
                     resolved
                         .secret_refs
                         .iter()
@@ -775,11 +777,13 @@ fn select_runner(
                         (RuntimeKind::Oci, ContentDigest::parse(digest)?)
                     }
                 };
-                let runner = ProcessWorkerRunner::new_with_policy(
+                let runner = ProcessWorkerRunner::new_with_harness(
                     resolved.argv,
                     resolved.secret_files,
                     resolved.sandbox,
                     resolved.policy,
+                    resolved.protocol,
+                    resolved.validation,
                 )?;
                 return Ok(SelectedRunner {
                     runner: AnyRunner::Process(Box::new(runner)),

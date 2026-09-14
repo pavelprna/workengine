@@ -123,9 +123,13 @@ vendor `if` in the core.
 ```toml
 [profile.coder]
 argv = ["my-agent", "--print"]
+protocol = "task-packet-v1"
 retry_limit = 2
 checkout = "/src"
 sandbox = { type = "bubblewrap", rootfs = "/opt/workengine/rootfs", digest = "sha256:<64 lowercase hex>", seccomp = "/etc/workengine/worker.bpf", seccomp_digest = "sha256:<64 lowercase hex>" }
+validation = [
+  { name = "repository check", argv = ["just", "check"] }
+]
 
 [profile.coder.policy]
 memory_bytes = 1073741824
@@ -154,6 +158,18 @@ backends drop every capability and have no direct network. Networked harnesses
 must speak to the explicitly mounted Unix broker socket named by
 `WORKENGINE_EGRESS_SOCKET`. A broken profile does not block Work that uses a
 different one.
+
+`task-packet-v1` is the production-shaped neutral harness contract. Before
+spawn, Workengine writes an attempt-specific JSON packet into the retained
+Workspace and mounts it read-only. The configured CLI receives
+`WORKENGINE_TASK_PACKET`, `WORKENGINE_ATTEMPT_RESPONSE`, and
+`WORKENGINE_CHECKPOINT` as fixed paths. Its response binds the Work, execution,
+attempt, and profile, then returns either a closed outcome with bounded,
+digest-verified change/validation proof or a structured question/consent
+request with a checkpoint. Validation proof is Worker-reported evidence;
+independent check execution and authority arrive in v0.9. The contracts are in
+[`schemas/task-packet.json`](schemas/task-packet.json) and
+[`schemas/attempt-response.json`](schemas/attempt-response.json).
 
 ## Queue and integrations
 
@@ -184,9 +200,9 @@ Workengine is not an agent, not an LLM supervisor, and not a tracker client.
 ## Status
 
 Workengine is pre-1.0. What you can do today is the local live-operator slice
-above. Project queues and product-neutral inbound/publisher adapters are
-present. The exact released version is reported by `workengine version` and by
-the Git tag.
+above, including the real Worker task-packet vertical slice. Project queues and
+product-neutral inbound/publisher adapters are present. The exact released
+version is reported by `workengine version` and by the Git tag.
 
 Public contracts — command names, exit codes, schemas — live in
 [compatibility.md](docs/product/compatibility.md). Behaviour lives in

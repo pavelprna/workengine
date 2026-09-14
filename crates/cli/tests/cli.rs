@@ -1,6 +1,11 @@
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
+use sha2::{Digest, Sha256};
+#[cfg(target_os = "linux")]
+use workengine_adapters_worker::{digest_file, digest_rootfs};
+
 fn bin() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_workengine"));
     command.env("WORKENGINE_DIRECT_CONTROL", "true");
@@ -98,6 +103,21 @@ fn reserve_port() -> Option<u16> {
         Err(error) => panic!("reserve localhost port: {error}"),
     };
     Some(listener.local_addr().unwrap().port())
+}
+
+#[cfg(target_os = "linux")]
+fn sandbox_available() -> bool {
+    Command::new("bwrap")
+        .args([
+            "--unshare-user",
+            "--ro-bind",
+            "/",
+            "/",
+            "--",
+            "/usr/bin/true",
+        ])
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 fn daemon_client(port: u16) -> Command {
@@ -901,6 +921,186 @@ fn answer_and_consent_continue_the_same_work_and_execution() {
             ("answer".to_owned(), "use option B".to_owned()),
             ("consent".to_owned(), "publish local artifact".to_owned()),
         ]
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn real_worker_vertical_slice_parks_answers_and_resumes_with_proof() {
+    if !sandbox_available() {
+        return;
+    }
+    let Some(port) = reserve_port() else { return };
+    let directory = tempfile::tempdir().unwrap();
+    let checkout = tempfile::tempdir().unwrap();
+    std::fs::write(checkout.path().join("greeting.txt"), "before\n").unwrap();
+    assert!(
+        Command::new("git")
+            .args(["-C", checkout.path().to_str().unwrap(), "init", "-q"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .args([
+                "-C",
+                checkout.path().to_str().unwrap(),
+                "add",
+                "greeting.txt",
+            ])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .args([
+                "-C",
+                checkout.path().to_str().unwrap(),
+                "-c",
+                "user.name=Workengine Test",
+                "-c",
+                "user.email=workengine@example.invalid",
+                "commit",
+                "-qm",
+                "base",
+            ])
+            .status()
+            .unwrap()
+            .success()
+    );
+
+    let runtime = tempfile::tempdir().unwrap();
+    let rootfs = runtime.path().join("rootfs");
+    for path in ["dev", "proc", "tmp", "run", "run/secrets", "workspace"] {
+        std::fs::create_dir_all(rootfs.join(path)).unwrap();
+    }
+    std::fs::copy("/usr/bin/busybox", rootfs.join("busybox")).unwrap();
+    let seccomp = runtime.path().join("seccomp.bpf");
+    std::fs::write(&seccomp, [0x06, 0, 0, 0, 0, 0, 0xff, 0x7f]).unwrap();
+    let rootfs_digest = digest_rootfs(&rootfs).unwrap();
+    let seccomp_digest = digest_file(&seccomp).unwrap();
+    let proof = "greeting changed";
+    let proof_digest = format!("sha256:{:x}", Sha256::digest(proof.as_bytes()));
+    let script = format!(
+        r#"work=$(/busybox sed -n 's/^[ ]*"workId": "\([^"]*\)",*$/\1/p' "$WORKENGINE_TASK_PACKET")
+execution=$(/busybox sed -n 's/^[ ]*"executionId": "\([^"]*\)",*$/\1/p' "$WORKENGINE_TASK_PACKET")
+attempt=$(/busybox sed -n 's/^[ ]*"attemptId": "\([^"]*\)",*$/\1/p' "$WORKENGINE_TASK_PACKET")
+profile=$(/busybox sed -n 's/^[ ]*"workerProfile": "\([^"]*\)",*$/\1/p' "$WORKENGINE_TASK_PACKET")
+if [ ! -s /workspace/.workengine/operator-inputs.jsonl ]; then
+  /busybox printf '{{"schemaVersion":1,"workId":"%s","executionId":"%s","attemptId":"%s","workerProfile":"%s"}}' "$work" "$execution" "$attempt" "$profile" > "$WORKENGINE_CHECKPOINT"
+  /busybox printf '{{"schemaVersion":1,"workId":"%s","executionId":"%s","attemptId":"%s","workerProfile":"%s","result":{{"type":"input_required","requestKind":"question","prompt":"Use the new greeting?"}}}}' "$work" "$execution" "$attempt" "$profile" > "$WORKENGINE_ATTEMPT_RESPONSE"
+else
+  /busybox sleep 2
+  /busybox printf hello > /workspace/greeting.txt
+  /busybox printf '{{"schemaVersion":1,"workId":"%s","executionId":"%s","attemptId":"%s","workerProfile":"%s","result":{{"type":"outcome","kind":"succeeded","proofs":[{{"kind":"change","name":"greeting-change","mediaType":"text/plain","sha256":"{proof_digest}","content":"{proof}"}}]}}}}' "$work" "$execution" "$attempt" "$profile" > "$WORKENGINE_ATTEMPT_RESPONSE"
+fi"#
+    );
+    let config_dir = directory.path().join("profiles");
+    std::fs::create_dir(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("coder.toml"),
+        format!(
+            r#"argv = ["/busybox", "sh", "-c", {script:?}]
+protocol = "task-packet-v1"
+checkout = "{}"
+sandbox = {{ type = "bubblewrap", rootfs = "{}", digest = "{rootfs_digest}", seccomp = "{}", seccomp_digest = "{seccomp_digest}" }}
+validation = [{{ name = "greeting exists", argv = ["/busybox", "test", "-s", "greeting.txt"] }}]
+"#,
+            checkout.path().display(),
+            rootfs.display(),
+            seccomp.display(),
+        ),
+    )
+    .unwrap();
+
+    let mut server = bin()
+        .args([
+            "--data-dir",
+            directory.path().to_str().unwrap(),
+            "--config-dir",
+            config_dir.to_str().unwrap(),
+            "--budget-ms",
+            "10000",
+            "serve",
+            "--port",
+            &port.to_string(),
+        ])
+        .spawn()
+        .unwrap();
+    wait_for_http(
+        port,
+        b"GET /api/v0/health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    let created = daemon_client(port)
+        .args([
+            "create",
+            "--goal",
+            "change the greeting",
+            "--profile",
+            "coder",
+            "--repository",
+            "repo:greeting",
+        ])
+        .output()
+        .unwrap();
+    assert!(created.status.success());
+    let id = stdout(&created)
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_owned();
+    let first = daemon_client(port)
+        .args(["start", "--work", &id])
+        .output()
+        .unwrap();
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(stdout(&first).ends_with(" parked"));
+    let answered = daemon_client(port)
+        .args(["answer", "--work", &id, "--answer", "Yes, use hello"])
+        .output()
+        .unwrap();
+    assert!(
+        answered.status.success(),
+        "{}",
+        String::from_utf8_lossy(&answered.stderr)
+    );
+    assert!(stdout(&answered).ends_with(" succeeded"));
+    let _ = server.kill();
+    let _ = server.wait();
+
+    let connection =
+        rusqlite::Connection::open(directory.path().join("workengine.sqlite")).unwrap();
+    let (executions, attempts, requests, proofs, heartbeat_advanced):
+        (i64, i64, i64, i64, bool) = connection
+        .query_row(
+            "SELECT
+               (SELECT COUNT(*) FROM executions WHERE work_id = ?1),
+               (SELECT COUNT(*) FROM attempts JOIN executions ON executions.id = attempts.execution_id WHERE executions.work_id = ?1),
+               (SELECT COUNT(*) FROM attempt_input_requests JOIN attempts ON attempts.id = attempt_input_requests.attempt_id JOIN executions ON executions.id = attempts.execution_id WHERE executions.work_id = ?1),
+               (SELECT COUNT(*) FROM confirmed_outcomes WHERE work_id = ?1 AND payload LIKE '%greeting-change%'),
+               (SELECT MAX(attempts.last_heartbeat_at_unix_ms > attempts.created_at_unix_ms) FROM attempts JOIN executions ON executions.id = attempts.execution_id WHERE executions.work_id = ?1)",
+            [&id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        )
+        .unwrap();
+    assert_eq!((executions, attempts, requests, proofs), (1, 2, 1, 1));
+    assert!(heartbeat_advanced);
+    let workspace = directory.path().join("workspaces/default").join(&id);
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("greeting.txt")).unwrap(),
+        "hello"
+    );
+    assert_eq!(
+        std::fs::read_dir(workspace.join(".workengine-task-packets"))
+            .unwrap()
+            .count(),
+        2
     );
 }
 

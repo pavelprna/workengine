@@ -23,14 +23,15 @@ pub use next::next;
 pub use operator::{record_operator_input, request_control};
 pub use park::{park, recover_unconfirmed};
 pub use ports::{
-    AttemptClaim, AttemptObservation, AttemptRecorder, AttemptState, BindRequest, CaptureLease,
-    CaptureRequest, ConfirmedOutcomeObservation, ControlDirective, ControlKind,
+    AttemptClaim, AttemptObservation, AttemptPark, AttemptRecorder, AttemptState, BindRequest,
+    CaptureLease, CaptureRequest, ConfirmedOutcomeObservation, ControlDirective, ControlKind,
     DiscardAttemptRecorder, ExecutionObservation, ExecutionSpecObservation, ExpectedContext,
-    InboundRecord, InboundSignal, InboundSource, InboundStore, MutationRequest, MutationResult,
-    OperatorInput, OperatorInputKind, ProcessEvent, ProcessRecordObservation, Publication,
-    PublicationKind, PublicationStore, Publisher, QueueStore, QuotaLease, QuotaStore,
-    RelationStore, RemoteMutation, RunRequest, SecretRefObservation, SequencedEvent, StartRequest,
-    WorkQuery, WorkStore, WorkerExit, WorkerRunner, WorkspaceFactory,
+    InboundRecord, InboundSignal, InboundSource, InboundStore, InputRequestObservation,
+    MutationRequest, MutationResult, OperatorInput, OperatorInputKind, ProcessEvent,
+    ProcessRecordObservation, Publication, PublicationKind, PublicationStore, Publisher,
+    QueueStore, QuotaLease, QuotaStore, RelationStore, RemoteMutation, RunRequest,
+    SecretRefObservation, SequencedEvent, StartRequest, WorkQuery, WorkStore, WorkerExit,
+    WorkerRunner, WorkspaceFactory,
 };
 pub use queue::{
     acquire_quota, add_relation, capture, configure_quota, recover_captures, release_capture,

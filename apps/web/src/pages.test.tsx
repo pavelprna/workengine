@@ -194,6 +194,7 @@ beforeEach(() => {
                   kind: "succeeded",
                   workerProfile: "stub",
                   confirmedAtUnixMs: "2000",
+                  proofs: [],
                 },
               },
             ],

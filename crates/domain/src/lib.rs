@@ -22,7 +22,10 @@ pub use execution::{
     EXECUTION_SPEC_SCHEMA_VERSION, ExecutionSpec, RuntimeKind, SecretRef, SecretSource,
 };
 pub use execution_id::ExecutionId;
-pub use outcome::{OUTCOME_SCHEMA_VERSION, Outcome, OutcomeKind};
+pub use outcome::{
+    InputRequest, InputRequestKind, MAX_PROOF_ARTIFACTS, MAX_PROOF_CONTENT_BYTES,
+    MAX_PROOF_TOTAL_BYTES, OUTCOME_SCHEMA_VERSION, Outcome, OutcomeKind, ProofArtifact, ProofKind,
+};
 pub use project_id::ProjectId;
 pub use relation::{RelationKind, WorkRelation};
 pub use status::WorkStatus;

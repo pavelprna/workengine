@@ -190,7 +190,7 @@ fn write_checkpoint_request(
     )
 }
 
-fn checkpoint_is_valid(request: &RunRequest<'_>) -> Result<bool, AppError> {
+pub(crate) fn checkpoint_is_valid(request: &RunRequest<'_>) -> Result<bool, AppError> {
     let bytes = match crate::fs_safe::read(&request.control_root.join("checkpoint.json")) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),

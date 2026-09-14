@@ -6,8 +6,11 @@ use std::process::Command;
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use workengine_application::{AppError, ChannelReaction, RunRequest, WorkerExit, WorkerRunner};
-use workengine_domain::{OUTCOME_SCHEMA_VERSION, Outcome, OutcomeKind};
+use workengine_domain::{
+    ContentDigest, OUTCOME_SCHEMA_VERSION, Outcome, OutcomeKind, ProofArtifact, ProofKind,
+};
 
 mod fs_safe;
 mod process;
@@ -15,8 +18,8 @@ mod stream;
 mod supervise;
 
 pub use process::{
-    EgressPolicy, ProcessWorkerRunner, ResourceLimits, Sandbox, SecretFile, WorkerPolicy,
-    digest_file, digest_rootfs,
+    EgressPolicy, ProcessWorkerRunner, ResourceLimits, Sandbox, SecretFile, ValidationStep,
+    WorkerPolicy, WorkerProtocol, digest_file, digest_rootfs,
 };
 pub use stream::{
     EVENT_CHILD_STDERR, EVENT_CHILD_STDOUT, EVENT_EXITED, EVENT_KILLED, EVENT_SPAWNED,
@@ -86,6 +89,18 @@ struct OutcomeDto {
     kind: String,
     #[serde(rename = "workerProfile")]
     worker_profile: String,
+    #[serde(default)]
+    proofs: Vec<ProofDto>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProofDto {
+    kind: String,
+    name: String,
+    media_type: String,
+    sha256: String,
+    content: String,
 }
 
 impl WorkerRunner for StubWorkerRunner {
@@ -107,6 +122,7 @@ impl WorkerRunner for StubWorkerRunner {
                 )?;
                 Ok(WorkerExit::Parked {
                     control_request_id: None,
+                    input_request: None,
                 })
             }
             StubBehavior::ChannelRetry => Err(AppError::Channel(ChannelReaction::Retry)),
@@ -141,7 +157,10 @@ fn run_await_control(request: &mut RunRequest<'_>) -> Result<WorkerExit, AppErro
     .env_clear()
     .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin");
     match spawn_supervised(cmd, request)? {
-        ChildWait::Parked { control_request_id } => Ok(WorkerExit::Parked { control_request_id }),
+        ChildWait::Parked { control_request_id } => Ok(WorkerExit::Parked {
+            control_request_id,
+            input_request: None,
+        }),
         ChildWait::Aborted { control_request_id } => Ok(WorkerExit::Aborted { control_request_id }),
         ChildWait::BudgetExceeded => persist_outcome(
             request.workspace_root,
@@ -166,13 +185,31 @@ pub fn decode_outcome(bytes: &[u8]) -> Result<Outcome, AppError> {
         serde_json::from_str(std::str::from_utf8(bytes).map_err(AppError::outcome_schema)?)
             .map_err(AppError::outcome_schema)?;
     let kind: OutcomeKind = dto.kind.parse().map_err(AppError::outcome_schema)?;
-    Outcome::new(dto.schema_version, kind, dto.worker_profile).map_err(|err| match err {
-        workengine_domain::DomainError::UnknownOutcomeKind(_)
-        | workengine_domain::DomainError::UnsupportedSchemaVersion(_) => {
-            AppError::outcome_schema(err)
-        }
-        other => AppError::from(other),
-    })
+    let proofs = dto
+        .proofs
+        .into_iter()
+        .map(|proof| {
+            let kind = proof.kind.parse::<ProofKind>()?;
+            let digest = ContentDigest::parse(&proof.sha256)?;
+            let actual = format!("sha256:{:x}", Sha256::digest(proof.content.as_bytes()));
+            if digest.as_str() != actual {
+                return Err(workengine_domain::DomainError::InvalidProofArtifact);
+            }
+            ProofArtifact::new(kind, proof.name, proof.media_type, digest, proof.content)
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(AppError::outcome_schema)?;
+    Outcome::new(dto.schema_version, kind, dto.worker_profile)
+        .and_then(|outcome| outcome.with_proofs(proofs))
+        .map_err(|err| match err {
+            workengine_domain::DomainError::UnknownOutcomeKind(_)
+            | workengine_domain::DomainError::UnknownProofKind(_)
+            | workengine_domain::DomainError::InvalidProofArtifact
+            | workengine_domain::DomainError::UnsupportedSchemaVersion(_) => {
+                AppError::outcome_schema(err)
+            }
+            other => AppError::from(other),
+        })
 }
 
 pub fn encode_outcome(outcome: &Outcome) -> Result<String, AppError> {
@@ -180,6 +217,17 @@ pub fn encode_outcome(outcome: &Outcome) -> Result<String, AppError> {
         schema_version: outcome.schema_version(),
         kind: outcome.kind().as_str().to_owned(),
         worker_profile: outcome.worker_profile().to_owned(),
+        proofs: outcome
+            .proofs()
+            .iter()
+            .map(|proof| ProofDto {
+                kind: proof.kind().as_str().to_owned(),
+                name: proof.name().to_owned(),
+                media_type: proof.media_type().to_owned(),
+                sha256: proof.digest().as_str().to_owned(),
+                content: proof.content().to_owned(),
+            })
+            .collect(),
     };
     serde_json::to_string(&dto).map_err(AppError::worker)
 }
@@ -213,7 +261,10 @@ fn run_writer(
             persist_outcome(request.workspace_root, OutcomeKind::BudgetExceeded, profile)
                 .map(WorkerExit::Completed)
         }
-        ChildWait::Parked { control_request_id } => Ok(WorkerExit::Parked { control_request_id }),
+        ChildWait::Parked { control_request_id } => Ok(WorkerExit::Parked {
+            control_request_id,
+            input_request: None,
+        }),
         ChildWait::Aborted { control_request_id } => Ok(WorkerExit::Aborted { control_request_id }),
     }
 }
@@ -239,7 +290,10 @@ fn run_budget(request: &mut RunRequest<'_>, profile: &str) -> Result<WorkerExit,
                 .map(WorkerExit::Completed)
         }
         ChildWait::Exited { .. } => Err(AppError::worker("budget stub exited before budget")),
-        ChildWait::Parked { control_request_id } => Ok(WorkerExit::Parked { control_request_id }),
+        ChildWait::Parked { control_request_id } => Ok(WorkerExit::Parked {
+            control_request_id,
+            input_request: None,
+        }),
         ChildWait::Aborted { control_request_id } => Ok(WorkerExit::Aborted { control_request_id }),
     }
 }
@@ -258,7 +312,10 @@ fn run_hang(request: &mut RunRequest<'_>, profile: &str) -> Result<WorkerExit, A
                 .map(WorkerExit::Completed)
         }
         ChildWait::Exited { .. } => Err(AppError::worker("hang stub exited before budget")),
-        ChildWait::Parked { control_request_id } => Ok(WorkerExit::Parked { control_request_id }),
+        ChildWait::Parked { control_request_id } => Ok(WorkerExit::Parked {
+            control_request_id,
+            input_request: None,
+        }),
         ChildWait::Aborted { control_request_id } => Ok(WorkerExit::Aborted { control_request_id }),
     }
 }
@@ -368,6 +425,15 @@ mod tests {
             .collect();
         let rust: Vec<&str> = OutcomeKind::ALL.iter().map(|k| k.as_str()).collect();
         assert_eq!(kinds, rust);
+        let proof_kinds: Vec<&str> = schema["properties"]["proofs"]["items"]["properties"]["kind"]
+            ["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect();
+        let rust_proof_kinds: Vec<&str> = ProofKind::ALL.iter().map(|kind| kind.as_str()).collect();
+        assert_eq!(proof_kinds, rust_proof_kinds);
         assert_eq!(schema["properties"]["schemaVersion"]["const"], 1);
     }
 

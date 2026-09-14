@@ -187,9 +187,130 @@ Scale from one local operator to independent projects and adapters.
 Exit criterion: a slow source, project, or publisher cannot block unrelated
 Work, and no external system becomes the status source of truth.
 
-## Beyond v0.x
+## v0.8 — Real Worker vertical slice
 
-Remote or multi-user operation is deliberately later: authentication, TLS,
-roles, audit actors, multi-host coordination, and a shared store need their own
-threat model and ADRs. They are not required for a valuable localhost operator
-release.
+Prove that the existing control plane can run useful coding-agent work rather
+than only demonstrate its mechanics with the built-in stub.
+
+- Add one production-shaped, product-neutral harness for an external coding
+  agent CLI. The selected executable remains Worker-profile configuration and
+  does not enter the domain or application crates.
+- Materialize an approved task packet, repository context, and validation
+  contract into the isolated Workspace as versioned data.
+- Return a typed outcome and bounded proof artifacts through the existing
+  attempt protocol. Free-form Worker text remains data and cannot choose Work
+  status.
+- Exercise the complete live lifecycle with a real workload: start, heartbeat,
+  outcome confirmation, park for a precise question or consent, answer, and
+  same-execution resume.
+- Keep this milestone to one Work at a time. Do not add planning, graph
+  expansion, or multi-agent coordination before the vertical slice exposes the
+  real integration gaps.
+
+Exit criterion: a representative change in a real repository can run inside a
+contained Workspace and finish with a reviewable change plus observable
+validation evidence, or park with a structured request for operator input.
+
+## v0.9 — Closed validation loop
+
+Let a Worker obtain and act on deterministic feedback without requiring the
+operator to relay every failed check.
+
+- Make the repository validation contract explicit and immutable for an
+  execution. The Worker can run the declared checks, inspect their result, fix
+  the change, and repeat within its budget.
+- Record structured validation evidence without persisting raw child output or
+  trusting a Worker-authored success claim as the authority.
+- Classify implementation failure, validation failure, environment failure,
+  dependency unavailability, missing permission, ambiguous intent, hang, and
+  budget exhaustion so that retry, park, and fail remain code decisions.
+- Extend accounting where evidence requires it, including attempt duration,
+  retries, validation cycles, operator interventions, and declared non-time
+  budgets.
+- Add an adapter-level silence or progress watchdog if real workloads show that
+  a wall-clock deadline alone is insufficient.
+
+Exit criterion: a representative Worker can iterate on a change for a
+substantial unattended run and finish with deterministic checks passed, or
+stop at the correct boundary with a specific, durable question. An ordinary
+test failure does not require a human relay step.
+
+## v0.10 — Approved change to Work graph
+
+Scale from one durable execution to one complete engineering change composed
+of several explicit Work items.
+
+- Accept an approved, versioned change description and decomposition through
+  an adapter. A model may propose the decomposition, but Workengine executes
+  only the persisted graph accepted by the operator or source policy.
+- Represent implementation, review, verification, and similar delivery phases
+  as Work data and Worker profiles, never as new canonical Work statuses.
+- Materialize parent/child, blocks, and follows relations and let the existing
+  deterministic queue select eligible Work.
+- Add a git-worktree Workspace adapter so independent Work can modify the same
+  repository identity without sharing a working copy.
+- Run independent Work in parallel under project and shared-resource quotas;
+  keep each Work under one status writer and one active-attempt lease.
+- Carry outputs between Work as versioned, attributed artifacts rather than as
+  implicit conversations between Workers.
+
+Exit criterion: one approved feature can execute as a mixed sequential and
+parallel Work graph, with every dependency, attempt, artifact, and operator
+intervention attributable from intake to verification.
+
+## v0.11 — Review, CI, and integration feedback
+
+Connect agent execution to the independent quality and integration systems
+that decide whether a change is ready to land.
+
+- Add git and forge adapters for expected branches, commits, reviews, and
+  compare-and-swap integration. A Worker never blind-writes the target branch.
+- Ingest CI results as explicit external signals. CI is verification evidence,
+  not the source of truth for Work status and not the lifecycle orchestrator.
+- Create bounded repair Work from failed deterministic checks without reopening
+  successful Work or allowing an unbounded retry loop.
+- Treat reviewer and verifier results as attributed evidence with explicit
+  acceptance policy. A model's approval alone cannot bypass mandatory checks.
+- Stop on changed repository context, conflicting integration state, missing
+  consent, or an exhausted budget and surface the decision to the operator.
+
+Exit criterion: an approved change can progress from its Work graph through
+implementation, local validation, review, CI feedback, bounded repair, and a
+review-ready integration candidate with a complete control-plane history.
+
+## v0.12 — Dogfood and operational hardening
+
+Use Workengine as a normal development system long enough to distinguish
+missing product capability from speculative infrastructure.
+
+- Run representative backlogs across more than one repository and retain the
+  evidence needed to compare task shapes, profiles, budgets, and failure modes.
+- Surface operational measures such as unattended completion, validation
+  cycles, attempts, park reasons, operator interventions, recovery events,
+  elapsed time, and declared spend.
+- Add explicit Workspace retention and cleanup policy, store migrations,
+  backup and restore, packaging, upgrade diagnostics, and reusable profile
+  distribution.
+- Exercise crash, stale lease, partial adapter failure, CI delay, integration
+  conflict, and unavailable dependency scenarios against the same invariants
+  used in normal execution.
+- Refine the Web operator around decisions and proof: what is running, why it
+  stopped, what was verified, what input is required, and what can safely
+  happen next.
+
+Exit criterion: Workengine is used repeatedly for real engineering work, no
+observed failure can create duplicate execution or divergent canonical status,
+and an operator can diagnose and control the system without reading SQLite or
+attaching to Worker processes.
+
+## 1.0 readiness
+
+The pre-1.0 line is ready to graduate when the local product has demonstrated
+the whole path above under routine use, its public contracts match actual
+operator workflows, supported store migrations and recovery paths are tested,
+and the remaining breaking changes are understood rather than speculative.
+
+Remote or multi-user operation remains deliberately later. Authentication,
+TLS, roles, audit actors, multi-host coordination, and a shared store require a
+separate threat model and ADRs. They are not prerequisites for a valuable,
+trustworthy local 1.0.

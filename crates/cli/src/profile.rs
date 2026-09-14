@@ -2,7 +2,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail};
 use toml::Value;
-use workengine_adapters_worker::{EgressPolicy, ResourceLimits, Sandbox, SecretFile, WorkerPolicy};
+use workengine_adapters_worker::{
+    EgressPolicy, ResourceLimits, Sandbox, SecretFile, ValidationStep, WorkerPolicy, WorkerProtocol,
+};
 use workengine_domain::{SecretRef, SecretSource};
 
 /// Worker profile loaded from configuration. Secrets are transient file references.
@@ -15,6 +17,8 @@ pub struct ResolvedProfile {
     pub checkout: Option<PathBuf>,
     pub sandbox: Sandbox,
     pub policy: WorkerPolicy,
+    pub protocol: WorkerProtocol,
+    pub validation: Vec<ValidationStep>,
 }
 
 pub fn load_table(path: &Path) -> anyhow::Result<toml::Table> {
@@ -72,10 +76,22 @@ pub fn resolve_profile(
     };
     let sandbox = resolve_sandbox(name, prof.get("sandbox"))?;
     let policy = resolve_policy(name, prof.get("policy"))?;
+    let protocol = resolve_protocol(name, prof.get("protocol"))?;
+    let validation = resolve_validation(name, prof.get("validation"))?;
+    if !validation.is_empty() && protocol != WorkerProtocol::TaskPacketV1 {
+        bail!("profile {name} validation requires protocol = \"task-packet-v1\"");
+    }
     if prof.keys().any(|key| {
         !matches!(
             key.as_str(),
-            "argv" | "retry_limit" | "checkout" | "secret_file" | "sandbox" | "policy"
+            "argv"
+                | "retry_limit"
+                | "checkout"
+                | "secret_file"
+                | "sandbox"
+                | "policy"
+                | "protocol"
+                | "validation"
         )
     }) {
         bail!("profile {name} has unknown fields");
@@ -88,7 +104,51 @@ pub fn resolve_profile(
         checkout,
         sandbox,
         policy,
+        protocol,
+        validation,
     })
+}
+
+fn resolve_protocol(profile: &str, value: Option<&Value>) -> anyhow::Result<WorkerProtocol> {
+    match value {
+        None => Ok(WorkerProtocol::LegacyOutcomeV1),
+        Some(Value::String(value)) if value == "legacy-outcome-v1" => {
+            Ok(WorkerProtocol::LegacyOutcomeV1)
+        }
+        Some(Value::String(value)) if value == "task-packet-v1" => Ok(WorkerProtocol::TaskPacketV1),
+        Some(_) => bail!("profile {profile} protocol must be legacy-outcome-v1 or task-packet-v1"),
+    }
+}
+
+fn resolve_validation(profile: &str, value: Option<&Value>) -> anyhow::Result<Vec<ValidationStep>> {
+    let Some(Value::Array(items)) = value else {
+        return if value.is_none() {
+            Ok(Vec::new())
+        } else {
+            bail!("profile {profile} validation must be an array of tables")
+        };
+    };
+    let mut steps = Vec::with_capacity(items.len());
+    if items.len() > 32 {
+        bail!("profile {profile} validation has more than 32 steps");
+    }
+    for item in items {
+        let Some(table) = item.as_table() else {
+            bail!("profile {profile} validation must be an array of tables");
+        };
+        if table
+            .keys()
+            .any(|key| !matches!(key.as_str(), "name" | "argv"))
+        {
+            bail!("profile {profile} validation step has unknown fields");
+        }
+        let Some(name) = table.get("name").and_then(Value::as_str) else {
+            bail!("profile {profile} validation step name is required");
+        };
+        let argv = string_array(table.get("argv"), "validation argv")?;
+        steps.push(ValidationStep::new(name, argv)?);
+    }
+    Ok(steps)
 }
 
 fn resolve_sandbox(profile: &str, value: Option<&Value>) -> anyhow::Result<Sandbox> {
@@ -389,5 +449,24 @@ sandbox = { type = "bubblewrap", rootfs = "/runtime" }
         );
         let error = resolve_profile(&missing, "echo", |_| None).unwrap_err();
         assert!(error.to_string().contains("sandbox.digest"), "{error}");
+    }
+
+    #[test]
+    fn task_packet_protocol_loads_validation_contract() {
+        let config = table(
+            r#"
+[profile.coder]
+argv = ["agent-cli", "--stdin"]
+protocol = "task-packet-v1"
+sandbox = { type = "oci", engine = "docker", image = "example@sha256:123", seccomp = "/etc/workengine/seccomp.json", seccomp_digest = "sha256:1111111111111111111111111111111111111111111111111111111111111111" }
+validation = [
+  { name = "repository check", argv = ["just", "check"] }
+]
+"#,
+        );
+        let resolved = resolve_profile(&config, "coder", |_| None).unwrap();
+        assert_eq!(resolved.protocol, WorkerProtocol::TaskPacketV1);
+        assert_eq!(resolved.validation[0].name(), "repository check");
+        assert_eq!(resolved.validation[0].argv(), ["just", "check"]);
     }
 }

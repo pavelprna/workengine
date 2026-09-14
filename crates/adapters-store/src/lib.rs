@@ -6,23 +6,23 @@ use std::str::FromStr;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use workengine_application::{
-    AppError, AttemptClaim, AttemptObservation, AttemptRecorder, AttemptState, CaptureLease,
-    CaptureRequest, ConfirmedOutcomeObservation, ControlDirective, ControlKind,
-    ExecutionObservation, ExecutionSpecObservation, InboundStore, OperatorInput, OperatorInputKind,
-    ProcessEvent, ProcessRecordObservation, Publication, PublicationKind, PublicationStore,
-    QueueStore, QuotaLease, QuotaStore, RelationStore, SecretRefObservation, SequencedEvent,
-    WorkQuery, WorkStore,
+    AppError, AttemptClaim, AttemptObservation, AttemptPark, AttemptRecorder, AttemptState,
+    CaptureLease, CaptureRequest, ConfirmedOutcomeObservation, ControlDirective, ControlKind,
+    ExecutionObservation, ExecutionSpecObservation, InboundStore, InputRequestObservation,
+    OperatorInput, OperatorInputKind, ProcessEvent, ProcessRecordObservation, Publication,
+    PublicationKind, PublicationStore, QueueStore, QuotaLease, QuotaStore, RelationStore,
+    SecretRefObservation, SequencedEvent, WorkQuery, WorkStore,
 };
 use workengine_domain::{
     AttemptId, CONFIRMED_OUTCOME_SCHEMA_VERSION, ConfirmedOutcome, ContentDigest,
     EVENT_SCHEMA_VERSION, EXECUTION_SPEC_SCHEMA_VERSION, EventKind, ExecutionId, ExecutionSpec,
-    OutcomeKind, ProjectId, RelationKind, SecretRef, SecretSource, Work, WorkAttributes, WorkEvent,
-    WorkId, WorkRelation, WorkStatus,
+    InputRequestKind, OutcomeKind, ProjectId, ProofArtifact, ProofKind, RelationKind, SecretRef,
+    SecretSource, Work, WorkAttributes, WorkEvent, WorkId, WorkRelation, WorkStatus,
 };
 
 const WORK_SCHEMA_VERSION: u32 = 1;
 /// SQLite `user_version`. Distinct from per-row `schema_version` on Work.
-const STORE_USER_VERSION: i32 = 6;
+const STORE_USER_VERSION: i32 = 7;
 
 const MIGRATION_1: &str = "
 CREATE TABLE IF NOT EXISTS works (
@@ -181,6 +181,14 @@ CREATE INDEX IF NOT EXISTS pending_publications
     ON publications(state, id);
 ";
 
+const MIGRATION_7: &str = "
+CREATE TABLE IF NOT EXISTS attempt_input_requests (
+    attempt_id TEXT PRIMARY KEY REFERENCES attempts(id),
+    kind TEXT NOT NULL,
+    prompt TEXT NOT NULL
+);
+";
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EventPayload {
@@ -262,6 +270,7 @@ struct ConfirmedOutcomePayload<'a> {
     kind: &'a str,
     worker_profile: &'a str,
     confirmed_at_unix_ms: u64,
+    proofs: Vec<ProofPayload<'a>>,
 }
 
 #[derive(Deserialize)]
@@ -274,6 +283,28 @@ struct StoredConfirmedOutcomePayload {
     kind: String,
     worker_profile: String,
     confirmed_at_unix_ms: u64,
+    #[serde(default)]
+    proofs: Vec<StoredProofPayload>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProofPayload<'a> {
+    kind: &'a str,
+    name: &'a str,
+    media_type: &'a str,
+    sha256: &'a str,
+    content: &'a str,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredProofPayload {
+    kind: String,
+    name: String,
+    media_type: String,
+    sha256: String,
+    content: String,
 }
 
 pub struct SqliteStore {
@@ -565,6 +596,7 @@ fn attempt_observations(
             checkpoint_recorded,
         ) = row.map_err(AppError::store)?;
         let attempt_id = AttemptId::parse(attempt_id)?;
+        let input_request = input_request_observation(conn, &attempt_id)?;
         attempts.push(AttemptObservation {
             process_records: process_record_observations(conn, &attempt_id)?,
             confirmed_outcome: confirmed_outcome_observation(
@@ -584,9 +616,31 @@ fn attempt_observations(
                 .transpose()?,
             terminal_reason,
             checkpoint_recorded,
+            input_request,
         });
     }
     Ok(attempts)
+}
+
+fn input_request_observation(
+    conn: &Connection,
+    attempt_id: &AttemptId,
+) -> Result<Option<InputRequestObservation>, AppError> {
+    let row: Option<(String, String)> = conn
+        .query_row(
+            "SELECT kind, prompt FROM attempt_input_requests WHERE attempt_id = ?1",
+            [attempt_id.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(AppError::store)?;
+    row.map(|(kind, prompt)| {
+        Ok(InputRequestObservation {
+            kind: kind.parse::<InputRequestKind>()?,
+            prompt,
+        })
+    })
+    .transpose()
 }
 
 fn process_record_observations(
@@ -660,11 +714,26 @@ fn confirmed_outcome_observation(
             "confirmed outcome payload has foreign provenance",
         ));
     }
+    let proofs = payload
+        .proofs
+        .into_iter()
+        .map(|proof| {
+            ProofArtifact::new(
+                proof.kind.parse::<ProofKind>()?,
+                proof.name,
+                proof.media_type,
+                ContentDigest::parse(proof.sha256)?,
+                proof.content,
+            )
+            .map_err(AppError::from)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(Some(ConfirmedOutcomeObservation {
         schema_version: payload.schema_version,
         kind: OutcomeKind::from_str(&payload.kind)?,
         worker_profile: payload.worker_profile,
         confirmed_at_unix_ms: payload.confirmed_at_unix_ms,
+        proofs,
     }))
 }
 
@@ -1168,7 +1237,19 @@ impl WorkStore for SqliteStore {
         checkpoint_recorded: bool,
         control_request_id: Option<i64>,
     ) -> Result<(), AppError> {
-        if !checkpoint_recorded {
+        self.park_attempt_with_input(&AttemptPark {
+            work,
+            event: &event,
+            execution_id,
+            attempt_id,
+            checkpoint_recorded,
+            control_request_id,
+            input_request: None,
+        })
+    }
+
+    fn park_attempt_with_input(&mut self, request: &AttemptPark<'_>) -> Result<(), AppError> {
+        if !request.checkpoint_recorded {
             return Err(AppError::Conflict(
                 "park requires a validated attempt checkpoint".to_owned(),
             ));
@@ -1182,17 +1263,17 @@ impl WorkStore for SqliteStore {
                  WHERE id = ?2 AND status = 'running'
                    AND active_execution_id = ?3 AND active_attempt_id = ?4",
                 params![
-                    work.workspace_root(),
-                    work.id().as_str(),
-                    execution_id.as_str(),
-                    attempt_id.as_str(),
+                    request.work.workspace_root(),
+                    request.work.id().as_str(),
+                    request.execution_id.as_str(),
+                    request.attempt_id.as_str(),
                 ],
             )
             .map_err(AppError::store)?;
         if changed != 1 {
-            return Err(attempt_conflict(attempt_id));
+            return Err(attempt_conflict(request.attempt_id));
         }
-        release_queue_quotas(&tx, work)?;
+        release_queue_quotas(&tx, request.work)?;
         let changed = tx
             .execute(
                 "UPDATE attempts
@@ -1204,25 +1285,37 @@ impl WorkStore for SqliteStore {
                      )
                  WHERE id = ?1 AND execution_id = ?2 AND state = 'active'",
                 params![
-                    attempt_id.as_str(),
-                    execution_id.as_str(),
-                    event.created_at_unix_ms() as i64,
+                    request.attempt_id.as_str(),
+                    request.execution_id.as_str(),
+                    request.event.created_at_unix_ms() as i64,
                 ],
             )
             .map_err(AppError::store)?;
         if changed != 1 {
-            return Err(attempt_conflict(attempt_id));
+            return Err(attempt_conflict(request.attempt_id));
+        }
+        if let Some(input_request) = request.input_request {
+            tx.execute(
+                "INSERT INTO attempt_input_requests (attempt_id, kind, prompt)
+                 VALUES (?1, ?2, ?3)",
+                params![
+                    request.attempt_id.as_str(),
+                    input_request.kind().as_str(),
+                    input_request.prompt(),
+                ],
+            )
+            .map_err(map_constraint_conflict)?;
         }
         resolve_controls(
             &tx,
-            work.id(),
-            control_request_id,
-            event.created_at_unix_ms(),
+            request.work.id(),
+            request.control_request_id,
+            request.event.created_at_unix_ms(),
         )?;
-        if control_request_id.is_none() {
-            enqueue_publication(&tx, &event, PublicationKind::ExternalInputRequired)?;
+        if request.control_request_id.is_none() {
+            enqueue_publication(&tx, request.event, PublicationKind::ExternalInputRequired)?;
         }
-        insert_event(&tx, &event)?;
+        insert_event(&tx, request.event)?;
         tx.commit().map_err(AppError::store)
     }
 
@@ -1890,6 +1983,7 @@ fn migrate(conn: &Connection) -> Result<(), AppError> {
         conn.execute_batch(MIGRATION_4).map_err(AppError::store)?;
         conn.execute_batch(MIGRATION_5).map_err(AppError::store)?;
         conn.execute_batch(MIGRATION_6).map_err(AppError::store)?;
+        conn.execute_batch(MIGRATION_7).map_err(AppError::store)?;
         conn.pragma_update(None, "user_version", STORE_USER_VERSION)
             .map_err(AppError::store)?;
     } else if current == 2 {
@@ -1897,21 +1991,29 @@ fn migrate(conn: &Connection) -> Result<(), AppError> {
         conn.execute_batch(MIGRATION_4).map_err(AppError::store)?;
         conn.execute_batch(MIGRATION_5).map_err(AppError::store)?;
         conn.execute_batch(MIGRATION_6).map_err(AppError::store)?;
+        conn.execute_batch(MIGRATION_7).map_err(AppError::store)?;
         conn.pragma_update(None, "user_version", STORE_USER_VERSION)
             .map_err(AppError::store)?;
     } else if current == 3 {
         conn.execute_batch(MIGRATION_4).map_err(AppError::store)?;
         conn.execute_batch(MIGRATION_5).map_err(AppError::store)?;
         conn.execute_batch(MIGRATION_6).map_err(AppError::store)?;
+        conn.execute_batch(MIGRATION_7).map_err(AppError::store)?;
         conn.pragma_update(None, "user_version", STORE_USER_VERSION)
             .map_err(AppError::store)?;
     } else if current == 4 {
         conn.execute_batch(MIGRATION_5).map_err(AppError::store)?;
         conn.execute_batch(MIGRATION_6).map_err(AppError::store)?;
+        conn.execute_batch(MIGRATION_7).map_err(AppError::store)?;
         conn.pragma_update(None, "user_version", STORE_USER_VERSION)
             .map_err(AppError::store)?;
     } else if current == 5 {
         conn.execute_batch(MIGRATION_6).map_err(AppError::store)?;
+        conn.execute_batch(MIGRATION_7).map_err(AppError::store)?;
+        conn.pragma_update(None, "user_version", STORE_USER_VERSION)
+            .map_err(AppError::store)?;
+    } else if current == 6 {
+        conn.execute_batch(MIGRATION_7).map_err(AppError::store)?;
         conn.pragma_update(None, "user_version", STORE_USER_VERSION)
             .map_err(AppError::store)?;
     }
@@ -2065,6 +2167,18 @@ fn encode_execution_spec(spec: &ExecutionSpec) -> Result<String, AppError> {
 }
 
 fn encode_confirmed_outcome(outcome: &ConfirmedOutcome) -> Result<String, AppError> {
+    let proofs = outcome
+        .outcome()
+        .proofs()
+        .iter()
+        .map(|proof| ProofPayload {
+            kind: proof.kind().as_str(),
+            name: proof.name(),
+            media_type: proof.media_type(),
+            sha256: proof.digest().as_str(),
+            content: proof.content(),
+        })
+        .collect();
     serde_json::to_string(&ConfirmedOutcomePayload {
         schema_version: outcome.schema_version(),
         work_id: outcome.work_id().as_str(),
@@ -2073,6 +2187,7 @@ fn encode_confirmed_outcome(outcome: &ConfirmedOutcome) -> Result<String, AppErr
         kind: outcome.outcome().kind().as_str(),
         worker_profile: outcome.outcome().worker_profile(),
         confirmed_at_unix_ms: outcome.confirmed_at_unix_ms(),
+        proofs,
     })
     .map_err(AppError::store)
 }
@@ -2161,8 +2276,9 @@ mod tests {
     use workengine_application::AttemptClaim;
     use workengine_domain::{
         AttemptId, CONFIRMED_OUTCOME_SCHEMA_VERSION, ChannelPolicy, ConfirmedOutcome,
-        ContentDigest, EXECUTION_SPEC_SCHEMA_VERSION, ExecutionId, ExecutionSpec,
-        OUTCOME_SCHEMA_VERSION, Outcome, OutcomeKind, RuntimeKind, replay,
+        ContentDigest, EXECUTION_SPEC_SCHEMA_VERSION, ExecutionId, ExecutionSpec, InputRequest,
+        InputRequestKind, OUTCOME_SCHEMA_VERSION, Outcome, OutcomeKind, ProofArtifact, ProofKind,
+        RuntimeKind, replay,
     };
 
     fn store() -> (SqliteStore, tempfile::TempDir) {
@@ -2393,6 +2509,32 @@ mod tests {
     }
 
     #[test]
+    fn v6_store_adds_structured_attempt_input_requests() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workengine.sqlite");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(MIGRATION_1).unwrap();
+        conn.execute_batch(MIGRATION_2).unwrap();
+        conn.execute_batch(MIGRATION_3).unwrap();
+        conn.execute_batch(MIGRATION_4).unwrap();
+        conn.execute_batch(MIGRATION_5).unwrap();
+        conn.execute_batch(MIGRATION_6).unwrap();
+        conn.pragma_update(None, "user_version", 6).unwrap();
+        drop(conn);
+
+        let store = SqliteStore::open(dir.path()).unwrap();
+        let table: String = store
+            .conn
+            .query_row(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'attempt_input_requests'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(table, "attempt_input_requests");
+    }
+
+    #[test]
     fn unknown_store_user_version_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("workengine.sqlite");
@@ -2548,7 +2690,23 @@ mod tests {
                 14,
             )
             .unwrap();
-        let outcome = Outcome::new(OUTCOME_SCHEMA_VERSION, OutcomeKind::Succeeded, "stub").unwrap();
+        let proof_content = "validation passed";
+        let outcome = Outcome::new(OUTCOME_SCHEMA_VERSION, OutcomeKind::Succeeded, "stub")
+            .unwrap()
+            .with_proofs(vec![
+                ProofArtifact::new(
+                    ProofKind::Validation,
+                    "unit-tests",
+                    "text/plain",
+                    ContentDigest::parse(
+                        "sha256:c312f1db3f41a4b3b3f816f3549d348feabe9a55f01533de93a8a56f6d48955e",
+                    )
+                    .unwrap(),
+                    proof_content,
+                )
+                .unwrap(),
+            ])
+            .unwrap();
         let confirmed = ConfirmedOutcome::new(
             CONFIRMED_OUTCOME_SCHEMA_VERSION,
             execution_id.clone(),
@@ -2598,6 +2756,10 @@ mod tests {
         assert_eq!(
             attempt.confirmed_outcome.as_ref().unwrap().kind,
             OutcomeKind::Succeeded
+        );
+        assert_eq!(
+            attempt.confirmed_outcome.as_ref().unwrap().proofs[0].content(),
+            proof_content
         );
 
         let stale = store.record_process_event(
@@ -2654,19 +2816,34 @@ mod tests {
         store
             .record_checkpoint(work.id(), &execution_id, &attempt_id, 10)
             .unwrap();
+        let input_request = InputRequest::new(
+            InputRequestKind::Question,
+            "Which compatibility boundary should remain?",
+        )
+        .unwrap();
+        let parked_event = WorkEvent::parked(&parked, WorkStatus::Running, 10);
         store
-            .park_attempt_with_checkpoint(
-                &parked,
-                WorkEvent::parked(&parked, WorkStatus::Running, 10),
-                &execution_id,
-                &attempt_id,
-                true,
-                Some(directive.request_id),
-            )
+            .park_attempt_with_input(&AttemptPark {
+                work: &parked,
+                event: &parked_event,
+                execution_id: &execution_id,
+                attempt_id: &attempt_id,
+                checkpoint_recorded: true,
+                control_request_id: Some(directive.request_id),
+                input_request: Some(&input_request),
+            })
             .unwrap();
         let observed = store.executions(work.id()).unwrap();
         assert_eq!(observed[0].attempts[0].state, AttemptState::Parked);
         assert!(observed[0].attempts[0].checkpoint_recorded);
+        assert_eq!(
+            observed[0].attempts[0]
+                .input_request
+                .as_ref()
+                .unwrap()
+                .prompt,
+            "Which compatibility boundary should remain?"
+        );
         assert!(
             store
                 .control_directive(work.id(), &execution_id, &attempt_id)

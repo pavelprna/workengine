@@ -2,8 +2,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use workengine_domain::{
-    AttemptId, ConfirmedOutcome, ExecutionId, ExecutionSpec, Outcome, OutcomeKind, ProjectId, Work,
-    WorkEvent, WorkId, WorkRelation, WorkStatus,
+    AttemptId, ConfirmedOutcome, ExecutionId, ExecutionSpec, InputRequest, InputRequestKind,
+    Outcome, OutcomeKind, ProjectId, ProofArtifact, Work, WorkEvent, WorkId, WorkRelation,
+    WorkStatus,
 };
 
 use crate::error::AppError;
@@ -180,6 +181,13 @@ pub struct ConfirmedOutcomeObservation {
     pub kind: OutcomeKind,
     pub worker_profile: String,
     pub confirmed_at_unix_ms: u64,
+    pub proofs: Vec<ProofArtifact>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InputRequestObservation {
+    pub kind: InputRequestKind,
+    pub prompt: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -192,6 +200,7 @@ pub struct AttemptObservation {
     pub finished_at_unix_ms: Option<u64>,
     pub terminal_reason: Option<String>,
     pub checkpoint_recorded: bool,
+    pub input_request: Option<InputRequestObservation>,
     pub process_records: Vec<ProcessRecordObservation>,
     pub confirmed_outcome: Option<ConfirmedOutcomeObservation>,
 }
@@ -369,6 +378,18 @@ pub trait WorkStore: WorkQuery + AttemptRecorder {
         self.park_attempt(work, event, execution_id, attempt_id)
     }
 
+    fn park_attempt_with_input(&mut self, request: &AttemptPark<'_>) -> Result<(), AppError> {
+        let _ = request.input_request;
+        self.park_attempt_with_checkpoint(
+            request.work,
+            request.event.clone(),
+            request.execution_id,
+            request.attempt_id,
+            request.checkpoint_recorded,
+            request.control_request_id,
+        )
+    }
+
     /// Persist an attempt-scoped operator request after validating the lease.
     fn request_control(
         &mut self,
@@ -419,6 +440,16 @@ pub struct AttemptClaim<'a> {
     pub started_at_unix_ms: u64,
     /// Present only when a queue consumer starts Work through its exact capture.
     pub capture: Option<&'a CaptureLease>,
+}
+
+pub struct AttemptPark<'a> {
+    pub work: &'a Work,
+    pub event: &'a WorkEvent,
+    pub execution_id: &'a ExecutionId,
+    pub attempt_id: &'a AttemptId,
+    pub checkpoint_recorded: bool,
+    pub control_request_id: Option<i64>,
+    pub input_request: Option<&'a InputRequest>,
 }
 
 /// Durable queue reservation. It is allocation state, never Work status.
@@ -632,8 +663,13 @@ pub trait WorkerRunner {
 
 pub enum WorkerExit {
     Completed(Outcome),
-    Parked { control_request_id: Option<i64> },
-    Aborted { control_request_id: i64 },
+    Parked {
+        control_request_id: Option<i64>,
+        input_request: Option<InputRequest>,
+    },
+    Aborted {
+        control_request_id: i64,
+    },
 }
 
 pub struct RunRequest<'a> {

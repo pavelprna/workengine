@@ -1,10 +1,14 @@
 use std::str::FromStr;
 
+use crate::ContentDigest;
 use crate::error::DomainError;
 use crate::status::WorkStatus;
 
 /// Schema version of the Worker outcome artifact for this slice.
 pub const OUTCOME_SCHEMA_VERSION: u32 = 1;
+pub const MAX_PROOF_ARTIFACTS: usize = 8;
+pub const MAX_PROOF_CONTENT_BYTES: usize = 65_536;
+pub const MAX_PROOF_TOTAL_BYTES: usize = 262_144;
 
 /// Closed set of Worker outcome kinds. Unknown kinds are a schema error.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -62,12 +66,154 @@ impl FromStr for OutcomeKind {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProofKind {
+    Change,
+    Validation,
+}
+
+impl ProofKind {
+    pub const ALL: [Self; 2] = [Self::Change, Self::Validation];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Change => "change",
+            Self::Validation => "validation",
+        }
+    }
+}
+
+impl FromStr for ProofKind {
+    type Err = DomainError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "change" => Ok(Self::Change),
+            "validation" => Ok(Self::Validation),
+            other => Err(DomainError::UnknownProofKind(other.to_owned())),
+        }
+    }
+}
+
+/// Bounded, Worker-authored evidence carried by a confirmed outcome.
+/// Validation proof is evidence of what the Worker reports, not an independent
+/// control-plane verification result.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProofArtifact {
+    kind: ProofKind,
+    name: String,
+    media_type: String,
+    digest: ContentDigest,
+    content: String,
+}
+
+impl ProofArtifact {
+    pub fn new(
+        kind: ProofKind,
+        name: impl Into<String>,
+        media_type: impl Into<String>,
+        digest: ContentDigest,
+        content: impl Into<String>,
+    ) -> Result<Self, DomainError> {
+        let name = name.into();
+        let media_type = media_type.into();
+        let content = content.into();
+        if !valid_label(&name, 128)
+            || !valid_label(&media_type, 128)
+            || content.len() > MAX_PROOF_CONTENT_BYTES
+        {
+            return Err(DomainError::InvalidProofArtifact);
+        }
+        Ok(Self {
+            kind,
+            name,
+            media_type,
+            digest,
+            content,
+        })
+    }
+
+    pub fn kind(&self) -> ProofKind {
+        self.kind
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn media_type(&self) -> &str {
+        &self.media_type
+    }
+
+    pub fn digest(&self) -> &ContentDigest {
+        &self.digest
+    }
+
+    pub fn content(&self) -> &str {
+        &self.content
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InputRequestKind {
+    Question,
+    Consent,
+}
+
+impl InputRequestKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Question => "question",
+            Self::Consent => "consent",
+        }
+    }
+}
+
+impl FromStr for InputRequestKind {
+    type Err = DomainError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "question" => Ok(Self::Question),
+            "consent" => Ok(Self::Consent),
+            other => Err(DomainError::UnknownInputRequestKind(other.to_owned())),
+        }
+    }
+}
+
+/// Structured reason for parking. Workengine maps this closed request to the
+/// park transition; the Worker never names a Work status.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InputRequest {
+    kind: InputRequestKind,
+    prompt: String,
+}
+
+impl InputRequest {
+    pub fn new(kind: InputRequestKind, prompt: impl Into<String>) -> Result<Self, DomainError> {
+        let prompt = prompt.into();
+        if !valid_label(&prompt, 4_096) {
+            return Err(DomainError::InvalidInputRequest);
+        }
+        Ok(Self { kind, prompt })
+    }
+
+    pub fn kind(&self) -> InputRequestKind {
+        self.kind
+    }
+
+    pub fn prompt(&self) -> &str {
+        &self.prompt
+    }
+}
+
 /// Versioned Worker outcome. Authorship is the Worker profile that produced it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Outcome {
     schema_version: u32,
     kind: OutcomeKind,
     worker_profile: String,
+    proofs: Vec<ProofArtifact>,
 }
 
 impl Outcome {
@@ -87,7 +233,20 @@ impl Outcome {
             schema_version,
             kind,
             worker_profile,
+            proofs: Vec::new(),
         })
+    }
+
+    pub fn with_proofs(mut self, proofs: Vec<ProofArtifact>) -> Result<Self, DomainError> {
+        let total = proofs
+            .iter()
+            .map(|proof| proof.content().len())
+            .sum::<usize>();
+        if proofs.len() > MAX_PROOF_ARTIFACTS || total > MAX_PROOF_TOTAL_BYTES {
+            return Err(DomainError::InvalidProofArtifact);
+        }
+        self.proofs = proofs;
+        Ok(self)
     }
 
     pub fn schema_version(&self) -> u32 {
@@ -101,6 +260,14 @@ impl Outcome {
     pub fn worker_profile(&self) -> &str {
         &self.worker_profile
     }
+
+    pub fn proofs(&self) -> &[ProofArtifact] {
+        &self.proofs
+    }
+}
+
+fn valid_label(value: &str, max: usize) -> bool {
+    !value.trim().is_empty() && value.len() <= max && !value.chars().any(char::is_control)
 }
 
 #[cfg(test)]
@@ -147,5 +314,31 @@ mod tests {
                 "channel_error"
             ]
         );
+    }
+
+    #[test]
+    fn proof_artifacts_and_input_requests_are_closed_and_bounded() {
+        let digest = ContentDigest::parse(
+            "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        )
+        .unwrap();
+        let proof = ProofArtifact::new(
+            ProofKind::Change,
+            "working-tree.patch",
+            "text/x-diff",
+            digest,
+            "diff",
+        )
+        .unwrap();
+        let too_many = vec![proof; MAX_PROOF_ARTIFACTS + 1];
+        assert!(
+            Outcome::new(OUTCOME_SCHEMA_VERSION, OutcomeKind::Succeeded, "coder")
+                .unwrap()
+                .with_proofs(too_many)
+                .is_err()
+        );
+        assert!("other".parse::<ProofKind>().is_err());
+        assert!("other".parse::<InputRequestKind>().is_err());
+        assert!(InputRequest::new(InputRequestKind::Question, "").is_err());
     }
 }

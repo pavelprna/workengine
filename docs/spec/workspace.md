@@ -34,6 +34,11 @@ This document is the canonical behaviour of Workspace. Keywords follow [RFC 2119
 - **[TESTED]** An answer or explicit consent MUST be stored as data for the same parked Work and MUST NOT create replacement Work.
 - **[TESTED]** Operator input materialized for a Worker MUST carry `schemaVersion`, an input id, Work id, kind, body, and occurrence time. Repeating materialization of the same input MUST NOT append a duplicate line.
 
+## Task packet
+
+- **[TESTED]** A real coding Worker attempt MUST receive its approved goal, repository context, validation contract, and operator-input path as one versioned task packet in its isolated Workspace.
+- **[TESTED]** Task packets MUST be attempt-specific and retained across same-execution resume. The active packet MUST be mounted read-only even though source files in the Workspace remain writable.
+
 ## Related
 
 - Work: [work.md](work.md)

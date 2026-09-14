@@ -16,6 +16,7 @@
 | [0011](0011-live-operator-daemon.md) | Local daemon owns lifecycle supervision | Accepted |
 | [0012](0012-deny-by-default-worker-policy.md) | Deny-by-default Worker policy and brokered egress | Accepted |
 | [0013](0013-project-queue-and-integration-boundaries.md) | Project-scoped queue and integration boundaries | Accepted |
+| [0014](0014-real-worker-attempt-contract.md) | Real Worker task packet and attempt response | Accepted |
 
 Status values: Proposed, Accepted, Superseded, Deprecated.
 
